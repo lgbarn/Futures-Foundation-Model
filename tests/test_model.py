@@ -582,3 +582,75 @@ def test_pretrain_per_task_losses_absent_without_labels():
     for task in ("regime", "volatility", "structure", "range"):
         assert f"{task}_loss" not in out, f"Unexpected '{task}_loss' key without labels"
     assert "loss" not in out
+
+
+def test_config_range_class_weights_default_none():
+    """range_class_weights defaults to None — no class weighting unless explicitly set."""
+    c = FFMConfig()
+    assert c.range_class_weights is None
+
+
+def test_config_range_class_weights_roundtrip():
+    """range_class_weights survives config save/load roundtrip."""
+    weights = [1.0, 2.5, 3.0, 2.5, 1.0]
+    c = FFMConfig(range_class_weights=weights)
+    with tempfile.TemporaryDirectory() as d:
+        c.save_pretrained(d)
+        c2 = FFMConfig.from_pretrained(d)
+    assert c2.range_class_weights == weights
+
+
+def test_pretrain_range_class_weights_produces_finite_loss():
+    """FFMForPretraining with range_class_weights produces finite loss — weights applied correctly."""
+    c = small_config()
+    c.range_class_weights = [1.0, 2.5, 3.0, 2.5, 1.0]
+    m = FFMForPretraining(c)
+    m.eval()
+    torch.manual_seed(0)
+    with torch.no_grad():
+        out = m(
+            features=torch.randn(4, SEQ_LEN, c.num_features),
+            range_labels=torch.randint(0, 5, (4,)),
+        )
+    assert torch.isfinite(out["loss"]), "Loss must be finite with range_class_weights set"
+    assert out["loss"].item() > 0.0
+
+
+def test_pretrain_range_class_weights_differ_from_unweighted():
+    """Range loss with class weights differs from unweighted loss — weights are actually applied."""
+    torch.manual_seed(1)
+    c_base = small_config()
+    c_weighted = small_config()
+    c_weighted.range_class_weights = [1.0, 2.5, 3.0, 2.5, 1.0]
+
+    # Share identical weights so only the loss function differs
+    m_base = FFMForPretraining(c_base)
+    m_weighted = FFMForPretraining(c_weighted)
+    m_weighted.load_state_dict(m_base.state_dict())
+
+    feats = torch.randn(4, SEQ_LEN, c_base.num_features)
+    range_labels = torch.randint(0, 5, (4,))
+    with torch.no_grad():
+        out_base     = m_base(features=feats, range_labels=range_labels)
+        out_weighted = m_weighted(features=feats, range_labels=range_labels)
+
+    assert not torch.allclose(out_base["loss"], out_weighted["loss"]), (
+        "Weighted and unweighted range losses should differ — class weights are not being applied"
+    )
+
+
+def test_pretrain_range_class_weights_backward():
+    """Backward pass works with range_class_weights — no gradient errors."""
+    c = small_config()
+    c.range_class_weights = [1.0, 2.5, 3.0, 2.5, 1.0]
+    m = FFMForPretraining(c)
+    m.train()
+    torch.manual_seed(2)
+    out = m(
+        features=torch.randn(4, SEQ_LEN, c.num_features),
+        range_labels=torch.randint(0, 5, (4,)),
+    )
+    out["loss"].backward()
+    grads = [p.grad for p in m.parameters() if p.grad is not None]
+    assert len(grads) > 0, "No gradients computed"
+    assert all(torch.isfinite(g).all() for g in grads), "Non-finite gradients with range_class_weights"

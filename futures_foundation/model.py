@@ -402,11 +402,19 @@ class FFMForPretraining(PreTrainedModel):
             ignore_index=-100, label_smoothing=ls, weight=_struct_weight
         )
 
+        # Range head uses class weights to prevent U-shaped collapse (q1+q5 dominate ~67% of labels).
+        _range_weight = None
+        if getattr(cfg, "range_class_weights", None) is not None:
+            _range_weight = torch.tensor(
+                cfg.range_class_weights, device=features.device, dtype=torch.float32
+            )
+        _range_ce = nn.CrossEntropyLoss(label_smoothing=ls, weight=_range_weight)
+
         labels_and_logits = [
             ("regime",     regime_labels,     regime_logits,     _masked_ce,    cfg.regime_loss_weight),
             ("volatility", volatility_labels, volatility_logits, _full_ce,      cfg.volatility_loss_weight),
             ("structure",  structure_labels,  structure_logits,  _structure_ce, cfg.structure_loss_weight),
-            ("range",      range_labels,      range_logits,      _full_ce,      cfg.range_loss_weight),
+            ("range",      range_labels,      range_logits,      _range_ce,     cfg.range_loss_weight),
         ]
 
         total_loss = torch.tensor(0.0, device=features.device)

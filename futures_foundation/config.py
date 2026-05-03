@@ -69,6 +69,9 @@ class FFMConfig(PretrainedConfig):
         # Class weights for structure head to prevent bearish-collapse on imbalanced data.
         # Set to [bullish_weight, bearish_weight] e.g. [2.0, 1.0] when bullish is ~30% of labels.
         structure_class_weights: Optional[List[float]] = None,
+        # Class weights for range head to prevent U-shaped collapse (q1+q5 dominate ~67% of labels).
+        # Set to [q1, q2, q3, q4, q5] e.g. [1.0, 2.5, 3.0, 2.5, 1.0] to upweight middle quintiles.
+        range_class_weights: Optional[List[float]] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -96,6 +99,7 @@ class FFMConfig(PretrainedConfig):
         self.structure_loss_weight = structure_loss_weight
         self.range_loss_weight = range_loss_weight
         self.structure_class_weights = structure_class_weights
+        self.range_class_weights = range_class_weights
 
         self.auto_map = {
             "AutoConfig": "futures_foundation.config.FFMConfig",
