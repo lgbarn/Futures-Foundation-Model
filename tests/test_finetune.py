@@ -2589,3 +2589,37 @@ def test_continue_from_f2_reverts_to_warm_start_mode():
     )
     assert effective_cfg.warm_start_mode == 'selective', (
         'F2+ must use the original warm_start_mode, not force full')
+
+
+def test_full_warm_start_skips_shape_mismatched_keys():
+    """Full warm start must transfer compatible weights and silently skip mismatched shapes.
+
+    Simulates loading a continue_from checkpoint when the new model has a different
+    number of strategy features (e.g., 16→14) or instrument embeddings (e.g., 8→9).
+    Compatible keys must transfer exactly; mismatched keys must stay at their new
+    model initialization, not raise RuntimeError.
+    """
+    cfg = small_ffm_config()
+
+    # Source model: NUM_STRATEGY_FEATURES features (matches test default)
+    prior_state = _make_trained_state(cfg, seed=77)
+
+    # Target model: NUM_STRATEGY_FEATURES + 2 features — strategy_projection.0.weight
+    # will have shape [hidden, N+2] vs prior's [hidden, N], triggering a size mismatch.
+    new_n_feats = NUM_STRATEGY_FEATURES + 2
+    model_new = HybridStrategyModel(cfg, new_n_feats)
+    init_strat_w = model_new.strategy_projection[0].weight.detach().clone()
+
+    # Must not raise; mismatched keys are silently skipped
+    _apply_warm_start(model_new, prior_state, mode='full', device=torch.device('cpu'))
+
+    new_sd = model_new.state_dict()
+
+    # Compatible backbone key must have transferred
+    bb_key = 'backbone.cls_token'
+    assert torch.allclose(new_sd[bb_key].cpu(), prior_state[bb_key].cpu()), (
+        'Compatible backbone key must transfer even when other keys mismatch')
+
+    # Mismatched strategy_projection.0.weight must NOT have been overwritten
+    assert new_sd['strategy_projection.0.weight'].shape == init_strat_w.shape, (
+        'strategy_projection.0.weight shape must remain unchanged after partial load')

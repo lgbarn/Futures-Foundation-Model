@@ -476,8 +476,19 @@ def _apply_warm_start(
         model.backbone.load_state_dict(backbone_state, strict=True)
         print('  ✅ Selective warm start — backbone transferred, heads re-initialised')
     elif mode == 'full':
-        model.load_state_dict({k: v.to(device) for k, v in warm_start_state.items()})
-        print('  ✅ Full warm start — entire model transferred from prev fold')
+        current_sd = model.state_dict()
+        compatible = {
+            k: v.to(device)
+            for k, v in warm_start_state.items()
+            if k in current_sd and current_sd[k].shape == v.shape
+        }
+        skipped = [k for k in warm_start_state if k not in compatible]
+        model.load_state_dict(compatible, strict=False)
+        if skipped:
+            print(f'  ✅ Full warm start — {len(compatible)} tensors transferred, '
+                  f'{len(skipped)} skipped (shape mismatch): {", ".join(skipped)}')
+        else:
+            print('  ✅ Full warm start — entire model transferred from prev fold')
     else:
         raise ValueError(
             f"Unknown warm_start_mode '{mode}'. "
