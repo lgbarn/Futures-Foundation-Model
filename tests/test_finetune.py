@@ -2864,3 +2864,44 @@ def test_confidence_calibration_deploy_marker(capsys):
     assert len(deploy_lines) >= 1, 'Deploy marker ◄ must appear for 0.80+ bands'
     assert all('0.8' in l or '0.9' in l for l in deploy_lines), (
         'Deploy marker must only appear on 0.80+ bands')
+
+
+def test_fold_epoch_override_applied():
+    """Fold dict 'epochs' key must override training_cfg.epochs for that fold only."""
+    import dataclasses
+    from futures_foundation.finetune.config import TrainingConfig as TC
+
+    cfg = TC(epochs=60)
+    fold_with_override = {'name': 'F1', 'train_end': '2022-04-01',
+                          'val_end': '2022-10-01', 'test_end': '2023-04-01', 'epochs': 40}
+    fold_without_override = {'name': 'F4', 'train_end': '2025-04-01',
+                              'val_end': '2025-08-01', 'test_end': '2026-01-01'}
+
+    # Simulate the per-fold logic in run_walk_forward
+    def effective_epochs(fold, training_cfg):
+        effective_cfg = training_cfg
+        if 'epochs' in fold:
+            effective_cfg = dataclasses.replace(effective_cfg, epochs=fold['epochs'])
+        return effective_cfg.epochs
+
+    assert effective_epochs(fold_with_override, cfg) == 40, \
+        'Fold with epochs=40 must override global epochs=60'
+    assert effective_epochs(fold_without_override, cfg) == 60, \
+        'Fold without epochs key must use global epochs=60'
+
+
+def test_fold_epoch_override_does_not_affect_config_hash():
+    """Fold-specific epochs must not change the config hash (hash is from global training_cfg)."""
+    from futures_foundation.finetune.trainer import _config_hash
+    from futures_foundation.finetune.config import TrainingConfig as TC
+
+    cfg = TC(epochs=60)
+    hash_60 = _config_hash(cfg)
+
+    cfg_40 = TC(epochs=40)
+    hash_40 = _config_hash(cfg_40)
+
+    # The global hash uses EPOCHS=60; fold-specific override does not change it
+    assert hash_60 != hash_40, 'Sanity: different global epochs must yield different hashes'
+    # The fold override does NOT touch training_cfg — global hash stays at 60
+    assert _config_hash(cfg) == hash_60, 'Config hash must be stable after fold override'

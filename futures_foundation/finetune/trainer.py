@@ -1133,6 +1133,9 @@ def run_walk_forward(
         )
         _sequential_f1 = False
 
+        if 'epochs' in fold:
+            effective_cfg = dataclasses.replace(effective_cfg, epochs=fold['epochs'])
+
         result = _train_fold(
             fold=fold,
             ffm_config=ffm_config,
