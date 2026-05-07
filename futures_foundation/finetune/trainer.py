@@ -545,7 +545,7 @@ def _make_optimizer(
 # ── Fold helpers ─────────────────────────────────────────────────────────────
 
 def _config_hash(training_cfg: TrainingConfig) -> str:
-    _hash_exclude = {'baseline_wr', 'f1_ok_ceiling', 'continue_from', 'backbone_swap_path'}
+    _hash_exclude = {'baseline_wr', 'f1_ok_ceiling', 'continue_from', 'backbone_swap_path', 'p80_patience'}
     d = {k: v for k, v in training_cfg.__dict__.items() if k not in _hash_exclude}
     return hashlib.md5(json.dumps(d, sort_keys=True).encode()).hexdigest()[:8]
 
@@ -819,8 +819,9 @@ def _train_fold(
     best_prec_at_80_stable = 0.0
     best_p80s_epoch        = -1
     best_p80s_state        = None
-    patience_ctr   = 0
-    ratio_bad_ctr  = 0
+    patience_ctr    = 0
+    p80s_patience_ctr = 0
+    ratio_bad_ctr   = 0
 
     if os.path.exists(ckpt_path):
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
@@ -948,6 +949,9 @@ def _train_fold(
                 'n_at_80':     va['n_at_80'],
             }, ckpt_p80s)
             save_str += ' 📈S'
+            p80s_patience_ctr = 0
+        elif best_p80s_state is not None:
+            p80s_patience_ctr += 1
 
         if ratio > training_cfg.max_ratio:
             ratio_bad_ctr += 1
@@ -990,7 +994,9 @@ def _train_fold(
             })
 
         if patience_ctr >= training_cfg.patience:
-            print(f'  ⏹ Early stop — patience exhausted'); break
+            print(f'  ⏹ Early stop — val_loss patience exhausted'); break
+        if p80s_patience_ctr >= training_cfg.p80_patience and best_p80s_state is not None:
+            print(f'  ⏹ Early stop — P@80 stable plateau ({p80s_patience_ctr} epochs, best E{best_p80s_epoch+1} {best_prec_at_80_stable:.3f})'); break
         if ratio_bad_ctr >= training_cfg.ratio_patience:
             print(f'  ⏹ Early stop — overfitting'); break
 

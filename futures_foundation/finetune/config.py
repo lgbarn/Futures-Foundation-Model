@@ -58,6 +58,7 @@ class TrainingConfig:
 
     # ── Early stopping ──
     patience: int = 15            # epochs without val_loss improvement
+    p80_patience: int = 10        # epochs without P@80 stable (N≥50) improvement
     max_ratio: float = 2.5        # val_loss / train_loss ceiling
     ratio_patience: int = 8       # consecutive epochs above max_ratio
 
