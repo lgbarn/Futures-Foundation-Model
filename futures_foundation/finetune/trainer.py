@@ -964,6 +964,8 @@ def _train_fold(
             patience_ctr += 1
 
         p80_str = f'P@80:{va["prec_at_80"]:.3f}({va["n_at_80"]})'
+        if best_p80s_state is not None and p80s_patience_ctr > 0:
+            p80_str += f' p80p:{p80s_patience_ctr}/{training_cfg.p80_patience}'
         if verbose:
             print(f'  {fold_name} E{epoch+1:2d}/{training_cfg.epochs} ({elapsed:.0f}s) | '
                   f'TrL:{tr["loss"]:.4f} VL:{va["loss"]:.4f} | '
