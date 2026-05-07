@@ -12,7 +12,7 @@ from futures_foundation import FFMConfig, get_model_feature_columns
 from futures_foundation.finetune import (
     StrategyLabeler, TrainingConfig,
     HybridStrategyModel, HybridStrategyDataset, FocalLoss,
-    run_labeling, run_walk_forward, export_onnx, print_eval_summary,
+    run_finetune, run_labeling, run_walk_forward, export_onnx, print_eval_summary,
     print_fold_progression, summarize_fold_precision,
 )
 from futures_foundation.finetune import validate_setup
@@ -3467,3 +3467,210 @@ def test_print_fold_progression_includes_header(capsys):
     out = capsys.readouterr().out
     assert 'FOLD-TO-FOLD LEARNING PROGRESSION' in out
     assert 'P@80' in out and 'N@80' in out and 'Delta' in out
+
+
+# ── fold_callback in run_walk_forward ─────────────────────────────────────────
+
+@pytest.mark.skipif(_skip_no_parquet(), reason='pyarrow not installed')
+def test_fold_callback_fires_after_each_fold(tmp_path):
+    """fold_callback receives (fold_name, metrics) after each fold completes."""
+    ffm_dir, strategy_dir = _write_fold_parquets(tmp_path, 'ES', n=2000)
+    backbone_path = tmp_path / 'backbone.pt'
+    cfg   = small_ffm_config()
+    model = HybridStrategyModel(cfg, NUM_STRATEGY_FEATURES)
+    torch.save(model.backbone.state_dict(), backbone_path)
+    output_dir = tmp_path / 'output'; output_dir.mkdir()
+
+    folds = [
+        {'name': 'F1', 'train_end': '2021-01-03', 'val_end': '2021-01-05', 'test_end': '2021-01-07'},
+        {'name': 'F2', 'train_end': '2021-01-05', 'val_end': '2021-01-07', 'test_end': '2021-01-10'},
+    ]
+    fired = []
+    run_walk_forward(
+        folds=folds, tickers=['ES'],
+        ffm_dir=ffm_dir, strategy_dir=strategy_dir,
+        output_dir=str(output_dir),
+        backbone_path=str(backbone_path),
+        ffm_config=cfg,
+        training_cfg=TrainingConfig(seq_len=SEQ_LEN, batch_size=16, sig_per_batch=2,
+                                    epochs=1, patience=50),
+        num_strategy_features=NUM_STRATEGY_FEATURES,
+        strategy_feature_cols=STRATEGY_COLS,
+        fold_callback=lambda name, m: fired.append((name, m)),
+        verbose=False,
+    )
+    assert len(fired) == 2
+    assert fired[0][0] == 'F1'
+    assert isinstance(fired[0][1], dict)
+
+
+@pytest.mark.skipif(_skip_no_parquet(), reason='pyarrow not installed')
+def test_fold_callback_none_does_not_raise(tmp_path):
+    """fold_callback=None (default) must not raise."""
+    ffm_dir, strategy_dir = _write_fold_parquets(tmp_path, 'ES', n=2000)
+    backbone_path = tmp_path / 'backbone.pt'
+    cfg   = small_ffm_config()
+    model = HybridStrategyModel(cfg, NUM_STRATEGY_FEATURES)
+    torch.save(model.backbone.state_dict(), backbone_path)
+    output_dir = tmp_path / 'output'; output_dir.mkdir()
+    folds = [{'name': 'F1', 'train_end': '2021-01-03',
+              'val_end': '2021-01-05', 'test_end': '2021-01-08'}]
+    run_walk_forward(
+        folds=folds, tickers=['ES'],
+        ffm_dir=ffm_dir, strategy_dir=strategy_dir,
+        output_dir=str(output_dir), backbone_path=str(backbone_path),
+        ffm_config=cfg,
+        training_cfg=TrainingConfig(seq_len=SEQ_LEN, batch_size=16, sig_per_batch=2,
+                                    epochs=1, patience=50),
+        num_strategy_features=NUM_STRATEGY_FEATURES,
+        strategy_feature_cols=STRATEGY_COLS,
+        fold_callback=None,
+        verbose=False,
+    )
+
+
+# ── run_finetune signature and parameter tests ────────────────────────────────
+
+import inspect as _inspect
+
+
+def test_run_finetune_required_params():
+    sig = _inspect.signature(run_finetune)
+    for param in ('labeler', 'config', 'folds', 'tickers', 'backbone_path',
+                  'ffm_config', 'output_dir', 'raw_dir', 'ffm_dir', 'strategy_dir'):
+        assert param in sig.parameters, f'run_finetune missing required param: {param}'
+
+
+def test_run_finetune_optional_defaults():
+    sig = _inspect.signature(run_finetune)
+    assert sig.parameters['baseline_wr'].default is None
+    assert sig.parameters['micro_to_full'].default is None
+    assert sig.parameters['timeframe'].default == '5min'
+    assert sig.parameters['ref'].default is None
+    assert sig.parameters['ref_label'].default == 'ref'
+    assert sig.parameters['gate2_desc'].default == 'backbone compounding'
+    assert sig.parameters['on_fold_complete'].default is None
+    assert sig.parameters['on_epoch_end'].default is None
+    assert sig.parameters['pretrained_path'].default is None
+    assert sig.parameters['device'].default is None
+
+
+def test_run_finetune_on_fold_complete_param_exists():
+    sig = _inspect.signature(run_finetune)
+    assert 'on_fold_complete' in sig.parameters
+
+
+def test_run_finetune_on_epoch_end_param_exists():
+    sig = _inspect.signature(run_finetune)
+    assert 'on_epoch_end' in sig.parameters
+
+
+def test_run_finetune_ref_params_exist():
+    sig = _inspect.signature(run_finetune)
+    assert 'ref' in sig.parameters
+    assert 'ref_label' in sig.parameters
+    assert 'gate2_desc' in sig.parameters
+
+
+def test_run_walk_forward_fold_callback_param_exists():
+    sig = _inspect.signature(run_walk_forward)
+    assert 'fold_callback' in sig.parameters
+    assert sig.parameters['fold_callback'].default is None
+
+
+def test_run_finetune_returns_dict_with_model_key(tmp_path):
+    """run_finetune returns fold_results dict containing '_model' key."""
+    ffm_dir_s, strategy_dir_s = _write_fold_parquets(tmp_path, 'ES', n=2000)
+    if ffm_dir_s is None:
+        pytest.skip('pyarrow not installed')
+
+    # Write minimal raw CSV so run_labeling can be called (cache hit on second call)
+    raw_dir = tmp_path / 'raw'; raw_dir.mkdir()
+    n = 300
+    raw_data = pd.DataFrame({
+        'datetime': pd.date_range('2023-01-01', periods=n, freq='5min'),
+        'open': np.ones(n) * 5000, 'high': np.ones(n) * 5001,
+        'low':  np.ones(n) * 4999, 'close': np.ones(n) * 5000,
+        'volume': np.ones(n) * 500,
+    })
+    raw_data.to_csv(raw_dir / 'ES_5min.csv', index=False)
+
+    # Pre-populate strategy_dir so labeling cache hits (avoids full labeler run)
+    cache_dir = tmp_path / 'strategy2'; cache_dir.mkdir()
+    lb = TrivialLabeler()
+    h  = _labeling_cache_hash(lb, ['ES'], '5min')
+    (cache_dir / 'labeling_hash.txt').write_text(h)
+    ffm_dir2 = tmp_path / 'ffm2'; ffm_dir2.mkdir()
+    import shutil
+    for f in (tmp_path / 'ffm').iterdir():
+        shutil.copy(f, ffm_dir2 / f.name)
+    for f in (tmp_path / 'strategy').iterdir():
+        shutil.copy(f, cache_dir / f.name)
+
+    backbone_path = tmp_path / 'backbone.pt'
+    cfg   = small_ffm_config()
+    model = HybridStrategyModel(cfg, NUM_STRATEGY_FEATURES)
+    torch.save(model.backbone.state_dict(), backbone_path)
+    output_dir = tmp_path / 'output2'; output_dir.mkdir()
+
+    folds = [{'name': 'F1', 'train_end': '2021-01-03',
+              'val_end': '2021-01-05', 'test_end': '2021-01-08'}]
+
+    result = run_finetune(
+        labeler=lb,
+        config=TrainingConfig(seq_len=SEQ_LEN, batch_size=16, sig_per_batch=2,
+                              epochs=1, patience=50),
+        folds=folds, tickers=['ES'],
+        backbone_path=str(backbone_path),
+        ffm_config=cfg,
+        output_dir=str(output_dir),
+        raw_dir=str(raw_dir),
+        ffm_dir=str(ffm_dir2),
+        strategy_dir=str(cache_dir),
+    )
+    assert isinstance(result, dict)
+    assert '_model' in result
+    assert 'F1' in result
+
+
+def test_run_finetune_on_fold_complete_fires(tmp_path):
+    """on_fold_complete callback fires for each completed fold."""
+    ffm_dir_s, strategy_dir_s = _write_fold_parquets(tmp_path, 'ES', n=2000)
+    if ffm_dir_s is None:
+        pytest.skip('pyarrow not installed')
+
+    raw_dir = tmp_path / 'raw'; raw_dir.mkdir()
+
+    cache_dir = tmp_path / 'sc'; cache_dir.mkdir()
+    lb = TrivialLabeler()
+    h  = _labeling_cache_hash(lb, ['ES'], '5min')
+    (cache_dir / 'labeling_hash.txt').write_text(h)
+    ffm_dir2 = tmp_path / 'ffm2'; ffm_dir2.mkdir()
+    import shutil
+    for f in (tmp_path / 'ffm').iterdir():
+        shutil.copy(f, ffm_dir2 / f.name)
+    for f in (tmp_path / 'strategy').iterdir():
+        shutil.copy(f, cache_dir / f.name)
+
+    backbone_path = tmp_path / 'backbone2.pt'
+    cfg   = small_ffm_config()
+    model = HybridStrategyModel(cfg, NUM_STRATEGY_FEATURES)
+    torch.save(model.backbone.state_dict(), backbone_path)
+    output_dir = tmp_path / 'out2'; output_dir.mkdir()
+
+    folds = [
+        {'name': 'F1', 'train_end': '2021-01-03', 'val_end': '2021-01-05', 'test_end': '2021-01-07'},
+        {'name': 'F2', 'train_end': '2021-01-05', 'val_end': '2021-01-07', 'test_end': '2021-01-10'},
+    ]
+    fired = []
+    run_finetune(
+        labeler=lb,
+        config=TrainingConfig(seq_len=SEQ_LEN, batch_size=16, sig_per_batch=2,
+                              epochs=1, patience=50),
+        folds=folds, tickers=['ES'],
+        backbone_path=str(backbone_path), ffm_config=cfg,
+        output_dir=str(output_dir), raw_dir=str(raw_dir),
+        ffm_dir=str(ffm_dir2), strategy_dir=str(cache_dir),
+        on_fold_complete=lambda name, m: fired.append(name),
+    )
+    assert 'F1' in fired and 'F2' in fired

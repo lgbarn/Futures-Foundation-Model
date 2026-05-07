@@ -1143,6 +1143,7 @@ def run_walk_forward(
     device=None,
     pretrained_path: str = None,
     epoch_callback=None,
+    fold_callback=None,
     verbose=True,
 ):
     """
@@ -1239,6 +1240,8 @@ def run_walk_forward(
         if result is not None:
             last_model, test_metrics, prev_fold_state = result
             fold_results[fold['name']] = test_metrics
+            if fold_callback is not None:
+                fold_callback(fold['name'], test_metrics)
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -1732,6 +1735,117 @@ def print_eval_summary(
         onnx_path = os.path.join(output_dir, 'cisd_ote_hybrid.onnx')
         print(f'\n  ONNX model: {onnx_path}')
         print(f'  Checkpoints: {output_dir}')
+
+
+def run_finetune(
+    labeler: StrategyLabeler,
+    config: TrainingConfig,
+    folds: list,
+    tickers: list,
+    backbone_path: str,
+    ffm_config: FFMConfig,
+    output_dir: str,
+    raw_dir: str,
+    ffm_dir: str,
+    strategy_dir: str,
+    baseline_wr: dict = None,
+    micro_to_full: dict = None,
+    timeframe: str = '5min',
+    ref: dict = None,
+    ref_label: str = 'ref',
+    gate2_desc: str = 'backbone compounding',
+    on_fold_complete=None,
+    on_epoch_end=None,
+    pretrained_path: str = None,
+    device=None,
+) -> dict:
+    """
+    Full fine-tuning pipeline in a single call.
+
+    Steps (in order):
+        1. run_labeling  — label all tickers; cache skipped when config unchanged
+        2. run_walk_forward — train all folds
+        3. on_fold_complete(fold_name, metrics) — fired after each fold (if provided)
+        4. print_eval_summary — combined threshold / per-fold / baseline table
+        5. print_fold_progression — fold-to-fold P@80 table + Gate 2 check
+
+    Parameters
+    ----------
+    labeler : StrategyLabeler
+        Concrete labeler subclass — provides feature_cols, config_dict(), run().
+    config : TrainingConfig
+        All training hyperparameters.
+    folds : list
+        Walk-forward fold definitions (name / train_end / val_end / test_end).
+    tickers : list
+        Instruments to train on.
+    backbone_path : str
+        Path to backbone .pt checkpoint.
+    ffm_config : FFMConfig
+        FFM model architecture config.
+    output_dir : str
+        Where to write fold checkpoints and ONNX model.
+    raw_dir : str
+        Directory of raw OHLCV CSVs ({ticker}_{timeframe}.csv).
+    ffm_dir : str
+        Directory of prepared FFM feature parquets ({ticker}_features.parquet).
+    strategy_dir : str
+        Directory for strategy label parquet cache.
+    baseline_wr : dict, optional
+        Per-ticker mechanical baseline win rates; passed to print_eval_summary.
+    micro_to_full : dict, optional
+        Micro-to-full ticker mapping (e.g. {'MES': 'ES'}).
+    timeframe : str
+        Bar timeframe string used to locate raw CSVs (default '5min').
+    ref : dict, optional
+        Prior-run P@80 per fold for progression comparison.
+    ref_label : str
+        Label for the ref column (e.g. 'v17', 'v18-5m').
+    gate2_desc : str
+        Phrase completing "must improve F1→F3 for <gate2_desc> to be working".
+    on_fold_complete : callable, optional
+        ``fn(fold_name: str, metrics: dict) -> None`` — called after each fold's
+        test completes.
+    on_epoch_end : callable, optional
+        ``fn(epoch_dict: dict) -> None`` — propagated to run_walk_forward as
+        epoch_callback; fires after every training epoch.
+    pretrained_path : str, optional
+        Path to pretrained .pt with context heads; enables context head weights.
+    device : torch.device, optional
+        Auto-detected (cuda/cpu) when None.
+
+    Returns
+    -------
+    dict
+        fold_results from run_walk_forward (fold_name → metrics, '_model' → model).
+    """
+    run_labeling(
+        labeler, tickers, raw_dir, ffm_dir, strategy_dir,
+        micro_to_full=micro_to_full, timeframe=timeframe, use_cache=True,
+    )
+
+    fold_results = run_walk_forward(
+        folds=folds,
+        tickers=tickers,
+        ffm_dir=ffm_dir,
+        strategy_dir=strategy_dir,
+        output_dir=output_dir,
+        backbone_path=backbone_path,
+        ffm_config=ffm_config,
+        training_cfg=config,
+        num_strategy_features=len(labeler.feature_cols),
+        strategy_feature_cols=list(labeler.feature_cols),
+        micro_to_full=micro_to_full,
+        device=device,
+        pretrained_path=pretrained_path,
+        epoch_callback=on_epoch_end,
+        fold_callback=on_fold_complete,
+    )
+
+    print_eval_summary(fold_results, baseline_wr=baseline_wr, output_dir=output_dir)
+    print_fold_progression(fold_results, ref=ref, ref_label=ref_label, gate2_desc=gate2_desc)
+
+    return fold_results
 
 
 def print_fold_progression(
