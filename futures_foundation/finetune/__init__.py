@@ -36,6 +36,7 @@ from .trainer import (
     export_onnx,
     extract_backbone,
     print_eval_summary,
+    print_fold_progression,
     print_rr_calibration,
     run_labeling,
     run_risk_head_calibration,
@@ -57,6 +58,7 @@ __all__ = [
     'export_onnx',
     'extract_backbone',
     'print_eval_summary',
+    'print_fold_progression',
     'summarize_fold_precision',
     'validate_setup',
 ]

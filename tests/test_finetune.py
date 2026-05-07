@@ -13,7 +13,7 @@ from futures_foundation.finetune import (
     StrategyLabeler, TrainingConfig,
     HybridStrategyModel, HybridStrategyDataset, FocalLoss,
     run_labeling, run_walk_forward, export_onnx, print_eval_summary,
-    summarize_fold_precision,
+    print_fold_progression, summarize_fold_precision,
 )
 from futures_foundation.finetune import validate_setup
 from futures_foundation.finetune.trainer import (
@@ -3274,3 +3274,73 @@ def test_summarize_fold_precision_skips_none_fold():
     result = summarize_fold_precision(fold_results)
     assert 'fold_1' in result
     assert 'fold_2' not in result
+
+
+# ── print_fold_progression ────────────────────────────────────────────────────
+
+def _make_progression_results(f1_prec, f2_prec, f3_prec, n_per_fold=20):
+    """Build fold_results with controlled P@80 per fold."""
+    def _fold(prec):
+        n_pos = round(n_per_fold * prec)
+        confs  = [0.85] * n_per_fold
+        labels = [1] * n_pos + [0] * (n_per_fold - n_pos)
+        return {'all_conf': confs, 'all_labels': labels}
+
+    return {
+        'F1': _fold(f1_prec),
+        'F2': _fold(f2_prec),
+        'F3': _fold(f3_prec),
+        '_model': None,
+    }
+
+
+def test_print_fold_progression_gate2_pass(capsys):
+    fold_results = _make_progression_results(0.50, 0.55, 0.60)
+    print_fold_progression(fold_results)
+    out = capsys.readouterr().out
+    assert '✅ PASS' in out
+    assert 'F1=' in out and 'F3=' in out
+
+
+def test_print_fold_progression_gate2_fail(capsys):
+    fold_results = _make_progression_results(0.60, 0.55, 0.50)
+    print_fold_progression(fold_results)
+    out = capsys.readouterr().out
+    assert '❌ FAIL' in out
+
+
+def test_print_fold_progression_ref_column(capsys):
+    fold_results = _make_progression_results(0.55, 0.60, 0.65)
+    ref = {'F1': 0.527, 'F2': 0.577, 'F3': 0.657}
+    print_fold_progression(fold_results, ref=ref, ref_label='v17')
+    out = capsys.readouterr().out
+    assert 'vs v17:' in out
+
+
+def test_print_fold_progression_no_ref_no_ref_column(capsys):
+    fold_results = _make_progression_results(0.55, 0.60, 0.65)
+    print_fold_progression(fold_results)
+    out = capsys.readouterr().out
+    assert 'vs ' not in out
+
+
+def test_print_fold_progression_missing_fold_prints_dash(capsys):
+    fold_results = {'F1': {'all_conf': [0.85], 'all_labels': [1]}, '_model': None}
+    print_fold_progression(fold_results)
+    out = capsys.readouterr().out
+    assert 'F2' in out and '—' in out
+
+
+def test_print_fold_progression_custom_gate2_desc(capsys):
+    fold_results = _make_progression_results(0.50, 0.55, 0.60)
+    print_fold_progression(fold_results, gate2_desc='cross-timeframe transfer')
+    out = capsys.readouterr().out
+    assert 'cross-timeframe transfer' in out
+
+
+def test_print_fold_progression_includes_header(capsys):
+    fold_results = _make_progression_results(0.50, 0.55, 0.60)
+    print_fold_progression(fold_results)
+    out = capsys.readouterr().out
+    assert 'FOLD-TO-FOLD LEARNING PROGRESSION' in out
+    assert 'P@80' in out and 'N@80' in out and 'Delta' in out

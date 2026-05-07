@@ -1689,6 +1689,75 @@ def print_eval_summary(
         print(f'  Checkpoints: {output_dir}')
 
 
+def print_fold_progression(
+    fold_results: dict,
+    ref: dict = None,
+    ref_label: str = 'ref',
+    gate2_desc: str = 'backbone compounding',
+) -> None:
+    """
+    Print fold-to-fold P@80 learning progression table and Gate 2 check.
+
+    Parameters
+    ----------
+    fold_results : dict
+        Output of run_walk_forward.
+    ref : dict, optional
+        Prior-run P@80 per fold for comparison (e.g. {'F1': 0.527, 'F2': 0.577, ...}).
+        Rows without a matching key show no comparison column.
+    ref_label : str
+        Label for the reference values shown in each row (e.g. 'v17', 'v18-5m').
+    gate2_desc : str
+        Short phrase completing "must improve F1→F3 for <gate2_desc> to be working".
+    """
+    fold_order = ['F1', 'F2', 'F3', 'F4', 'F5']
+    prev_p80   = None
+    f1_p80     = None
+    f3_p80     = None
+
+    print(f'\n{"="*60}')
+    print('  FOLD-TO-FOLD LEARNING PROGRESSION')
+    print(f'{"="*60}')
+    print(f'  {"Fold":<6}  {"P@80":>6}  {"N@80":>5}  {"Delta":>7}  Status')
+    print(f'  {"-"*50}')
+
+    for fn in fold_order:
+        m = fold_results.get(fn)
+        if m is None:
+            print(f'  {fn:<6}  {"—":>6}')
+            continue
+        conf = np.array(m['all_conf'])
+        lab  = np.array(m['all_labels'])
+        mask = conf >= 0.80
+        n    = int(mask.sum())
+        p80  = float((lab[mask] > 0).mean()) if n > 0 else 0.0
+
+        delta_str = '—'
+        status    = ''
+        if prev_p80 is not None:
+            delta     = p80 - prev_p80
+            delta_str = f'{delta:+.1%}'
+            status    = '✅' if delta > 0 else ('➡' if abs(delta) < 0.02 else '❌')
+
+        ref_str = ''
+        if ref is not None:
+            ref_val = ref.get(fn)
+            ref_str = f'  vs {ref_label}:{ref_val:.0%}' if ref_val is not None else ''
+
+        print(f'  {fn:<6}  {p80:>6.1%}  {n:>5}  {delta_str:>7}  {status}{ref_str}')
+
+        if fn == 'F1': f1_p80 = p80
+        if fn == 'F3': f3_p80 = p80
+        prev_p80 = p80
+
+    print(f'{"="*60}')
+    print(f'  Gate 2: P@80 must improve F1→F3 for {gate2_desc} to be working')
+    if f1_p80 is not None and f3_p80 is not None:
+        gate2 = '✅ PASS' if f3_p80 > f1_p80 else '❌ FAIL'
+        print(f'  Gate 2: F1={f1_p80:.1%} → F3={f3_p80:.1%}  {gate2}')
+    print(f'{"="*60}')
+
+
 def summarize_fold_precision(fold_results: dict) -> dict:
     """
     Return per-fold precision at standard confidence thresholds.
