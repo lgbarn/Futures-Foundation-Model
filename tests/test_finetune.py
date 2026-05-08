@@ -2566,6 +2566,28 @@ def test_p80s_checkpoint_requires_min_n_50():
     assert p80s, 'N=200 should qualify for stable checkpoint'
 
 
+def test_effective_n_stable_scales_with_val_signal_count():
+    """effective_n_stable = min(cfg, max(10, int(val_pos_count * 0.08)))."""
+    def effective(val_pos_count, cfg_n_stable_min):
+        return min(cfg_n_stable_min, max(10, int(val_pos_count * 0.08)))
+
+    # Large val window — capped by cfg
+    assert effective(500, 25) == 25   # 500*0.08=40 → capped at 25
+    assert effective(800, 25) == 25
+
+    # Medium val window — capped by cfg
+    assert effective(312, 25) == 24   # 312*0.08=24.96 → 24 < 25 → 24
+
+    # Small val window — scales down but floored at 10
+    assert effective(150, 25) == 12   # 150*0.08=12
+    assert effective(100, 25) == 10   # 100*0.08=8 → floor 10
+    assert effective(50, 25)  == 10   # floor
+
+    # cfg lower than computed — cfg wins
+    assert effective(500, 15) == 15
+    assert effective(100, 8)  == 8    # cfg below floor, still wins (min wins)
+
+
 def test_p80s_checkpoint_saved_and_restored(tmp_path):
     """_p80s.pt round-trips: save then restore restores score and state correctly."""
     cfg         = small_ffm_config()

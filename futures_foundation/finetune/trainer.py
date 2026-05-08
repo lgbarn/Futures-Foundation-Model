@@ -816,8 +816,10 @@ def _train_fold(
 
     n_sig   = len(train_ds.signal_indices)
     n_total = len(train_ds)
+    val_pos_count      = sum(len(d.signal_indices) for d in val_dsets)
+    effective_n_stable = min(training_cfg.n_stable_min, max(10, int(val_pos_count * 0.08)))
     print(f'\n  Train: {n_total:,} windows, {n_sig} signals ({n_sig/n_total*100:.2f}%)')
-    print(f'  Val:   {len(val_ds):,} windows')
+    print(f'  Val:   {len(val_ds):,} windows, {val_pos_count} signals → n_stable_min={effective_n_stable} (cfg={training_cfg.n_stable_min})')
 
     train_loader = _make_balanced_loader(train_ds, training_cfg.batch_size,
                                          training_cfg.sig_per_batch)
@@ -941,8 +943,8 @@ def _train_fold(
         f1_better = va['f1'] > best_signal_f1 and ratio <= training_cfg.f1_ok_ceiling
         # P@0.80 peak: require ≥15 predictions at conf≥0.80 — blocks 1-in-4 lucky shots
         p80_better  = (va['prec_at_80'] > best_prec_at_80 and va['n_at_80'] >= 15)
-        # P@0.80 stable: require ≥n_stable_min predictions — statistically robust, preferred at test time
-        p80s_better = (va['prec_at_80'] > best_prec_at_80_stable and va['n_at_80'] >= training_cfg.n_stable_min)
+        # P@0.80 stable: require ≥effective_n_stable predictions — statistically robust, preferred at test time
+        p80s_better = (va['prec_at_80'] > best_prec_at_80_stable and va['n_at_80'] >= effective_n_stable)
         save_str  = ''
 
         if improved:
@@ -1004,13 +1006,13 @@ def _train_fold(
             save_str += ' 📈S'
             p80s_patience_ctr = 0
         elif best_p80s_state is not None:
-            if va['n_at_80'] >= training_cfg.n_stable_min:
+            if va['n_at_80'] >= effective_n_stable:
                 p80s_patience_ctr += 1
             # N below stable threshold — counter frozen; low N makes P@80 unreliable
 
         # ── N-triggered gamma acceleration ──
         if _gamma_schedule and epoch < _decay_start:
-            if va['n_at_80'] < training_cfg.n_stable_min:
+            if va['n_at_80'] < effective_n_stable:
                 _n_collapse_ctr += 1
                 if _n_collapse_ctr >= 3:
                     _decay_start    = epoch
@@ -1081,7 +1083,7 @@ def _train_fold(
     print(f'    val_loss        : epoch={best_val_epoch+1} score={best_val_loss:.4f}')
     print(f'    signal_f1       : epoch={best_f1_epoch+1} score={best_signal_f1:.4f}')
     print(f'    prec_at_80 peak : {p80_str}')
-    print(f'    prec_at_80 stable (N≥{training_cfg.n_stable_min}): {p80s_str}')
+    print(f'    prec_at_80 stable (N≥{effective_n_stable}): {p80s_str}')
     print(f'  Priority: stable > peak > f1 > loss')
 
     if best_p80s_state is not None:
