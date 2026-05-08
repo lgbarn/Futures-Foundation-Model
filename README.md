@@ -53,7 +53,7 @@ Adding a new strategy now requires implementing one class. Everything else — t
 ### Add a new strategy in ~30 lines
 
 ```python
-from futures_foundation.finetune import StrategyLabeler, TrainingConfig, run_labeling, run_walk_forward
+from futures_foundation.finetune import StrategyLabeler, TrainingConfig, run_finetune
 
 class MyStrategyLabeler(StrategyLabeler):
     @property
@@ -71,24 +71,26 @@ class MyStrategyLabeler(StrategyLabeler):
 ```
 
 ```python
-# Cell 3 — Label all tickers (cached to parquet on first run)
+# Single call — labeling, walk-forward training, evaluation, and fold progression all in one
 labeler = MyStrategyLabeler()
-run_labeling(labeler, TICKERS, RAW_DATA_DIR, PREPARED_DIR, CACHE_DIR)
-
-# Cell 4 — Walk-forward fine-tuning (N folds, selective warm start, tiered checkpoint)
-fold_results = run_walk_forward(
-    folds=FOLDS, tickers=TICKERS, ffm_dir=PREPARED_DIR,
-    strategy_dir=CACHE_DIR, output_dir=OUTPUT_DIR,
-    backbone_path=BACKBONE_PATH, ffm_config=ffm_config,
-    training_cfg=TrainingConfig(), num_strategy_features=3,
-    strategy_feature_cols=labeler.feature_cols,
-    epoch_callback=lambda m: print(f"  {m['fold']} E{m['epoch']} P@80:{m['prec_at_80']:.3f}(N={m['n_at_80']})"),
+fold_results = run_finetune(
+    labeler=labeler,
+    config=TrainingConfig(),
+    folds=FOLDS,
+    tickers=TICKERS,
+    backbone_path=BACKBONE_PATH,
+    ffm_config=ffm_config,
+    output_dir=OUTPUT_DIR,
+    raw_dir=RAW_DATA_DIR,
+    ffm_dir=PREPARED_DIR,
+    strategy_dir=CACHE_DIR,
+    baseline_wr=BASELINE_WR,
+    on_epoch_end=lambda m: print(f"  {m['fold']} E{m['epoch']} P@80:{m['prec_at_80']:.3f}(N={m['n_at_80']})"),
+    on_fold_complete=lambda fold, metrics: print(f"  {fold} done — P@80:{metrics.get('prec_at_80', 0):.3f}"),
 )
-
-# Cell 5 — Evaluation (confidence thresholds, per-fold, vs baseline)
-from futures_foundation.finetune import print_eval_summary
-print_eval_summary(fold_results, baseline_wr=BASELINE_WR)
 ```
+
+`run_finetune` executes the full pipeline in order: (1) label all tickers with cache, (2) walk-forward training across all folds, (3) `print_eval_summary` confidence threshold table, (4) `print_fold_progression` fold-to-fold P@80 table with Gate 2 check. The lower-level `run_labeling`, `run_walk_forward`, and `print_eval_summary` remain available for scripts that need intermediate access between steps.
 
 **Backbone reuse across runs** — after a walk-forward completes, extract the trained backbone to use as the starting point for the next run. The backbone accumulates domain knowledge across runs; the signal head always cold-starts to stay honest to each fold's regime:
 
@@ -183,8 +185,9 @@ export_onnx(
 | `TrainingConfig` | Dataclass holding all training hyperparameters |
 | `HybridStrategyModel` | FFM backbone + strategy feature projection + signal/risk/confidence heads |
 | `HybridStrategyDataset` | Sliding-window dataset parameterised by your strategy feature columns |
-| `run_labeling()` | CSV I/O, timezone normalization, parquet caching per ticker |
-| `run_walk_forward()` | N-fold walk-forward, selective warm start, tiered checkpoint selection, disconnect recovery |
+| `run_finetune()` | **Single-call full pipeline** — labeling → walk-forward → eval summary → fold progression; `on_epoch_end` and `on_fold_complete` callbacks for custom monitoring |
+| `run_labeling()` | Lower-level: CSV I/O, timezone normalization, parquet caching per ticker |
+| `run_walk_forward()` | Lower-level: N-fold walk-forward, selective warm start, tiered checkpoint selection, disconnect recovery |
 | `run_risk_head_calibration()` | Phase 2: freeze signal head, fine-tune risk_head with Huber loss on signal-only subsets |
 | `print_eval_summary()` | Confidence threshold table with AvgMaxRR column, per-fold breakdown, vs-baseline comparison |
 | `print_rr_calibration()` | Phase 2 calibration table: predicted R:R vs actual max_rr at each threshold |
@@ -480,7 +483,7 @@ Futures-Foundation-Model/
 
 | Version | Description |
 |---------|-------------|
-| **v0.9** | Auto-scaled `n_stable_min` — trainer computes `effective_n_stable = min(cfg, max(10, int(val_pos_count × 0.08)))` per fold from actual val signal count; `n_stable_min` in `TrainingConfig` becomes a cap, not a fixed bar; later walk-forward folds (shorter val windows, fewer signals) no longer fail to produce stable checkpoints; val print line shows computed value vs cfg for visibility |
+| **v0.9** | `run_finetune()` — single-call full pipeline replacing the prior 3-step sequence (labeling + walk-forward + eval); accepts `on_epoch_end` and `on_fold_complete` callbacks; auto-scaled `n_stable_min` — trainer computes `effective_n_stable = min(cfg, max(10, int(val_pos_count × 0.08)))` per fold from actual val signal count so later walk-forward folds with shorter val windows no longer fail to produce stable checkpoints |
 | **v0.8** | Dual patience (`p80_patience`) — P@80 stable (N≥50) tracked independently of val_loss patience; fires early stop when P@80 plateaus even while val_loss is still declining, saving ~30–40% of epochs in typical runs; `backbone_swap_path` in `TrainingConfig` — splices a newer backbone into a `continue_from` checkpoint before training (upgrade backbone, keep strategy heads, no cold start); `risk_head_donor_path` in `export_onnx()` — replaces the final fold's risk head with a better-calibrated earlier fold's risk head at export time; per-fold `epochs` key — overrides global epoch count for a specific fold without touching the config hash |
 | **v0.7** | `AvgMaxRR` column in per-threshold table (average max R:R of winning trades — confirms edge has real follow-through); confidence calibration block auto-printed after every fold (win rate by confidence band with monotonicity check; non-monotonic = deployment blocker); full warm start gracefully skips shape-mismatched keys with a warning instead of crashing (enables `continue_from` across runs with minor architectural differences) |
 | **v0.6** | 9-instrument library support (added CL, ZB, ZN); `continue_from` in `TrainingConfig` for iterative multi-pass fine-tuning (F1 warm-starts full from prior run's `_done.pt`, F2-F5 use `warm_start_mode`); `continue_from` excluded from config hash to preserve fold-resume cache |
@@ -545,6 +548,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 - [x] **`risk_head_donor_path` in `export_onnx()`** — replace final fold's degraded risk head with a better-calibrated earlier fold's risk head at export time
 - [x] **Per-fold epoch override** — `epochs` key in fold dict overrides global `TrainingConfig.epochs` for that fold only; config hash unaffected
 - [x] **Dual patience (`p80_patience`)** — P@80 stable (N≥50) patience tracked independently of val_loss; fires early stop when P@80 plateaus even while val_loss is still declining; saves ~30–40% of epoch budget in typical runs
+- [x] **`run_finetune()` single-call pipeline** — replaces the prior 3-step sequence (run_labeling + run_walk_forward + print_eval_summary); adds `on_epoch_end` and `on_fold_complete` callbacks; lower-level functions remain available for scripts needing intermediate access
 - [x] **Auto-scaled `n_stable_min`** — trainer computes effective threshold from actual val signal count per fold; `n_stable_min` in `TrainingConfig` is a cap; later walk-forward folds with shorter val windows scale down proportionally (floor=10), floored to prevent noise-driven checkpoints; fixes F4/F5 stable checkpoint collapse in sparse-signal strategies
 - [ ] Additional strategy implementations (ORB, ICT breaker blocks)
 - [ ] Multi-timeframe input support
