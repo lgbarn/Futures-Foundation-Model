@@ -42,6 +42,7 @@ from .finetune import (
     run_labeling, run_walk_forward, export_onnx, print_eval_summary,
 )
 from . import primitives
+from .pretrain import PretrainConfig, prepare_data, run_pretrain, verify_backbone
 
 __version__ = "0.4.0"
 __all__ = [
@@ -58,4 +59,5 @@ __all__ = [
     "HybridStrategyModel", "HybridStrategyDataset", "FocalLoss",
     "run_labeling", "run_walk_forward", "export_onnx", "print_eval_summary",
     "primitives",
+    "PretrainConfig", "prepare_data", "run_pretrain", "verify_backbone",
 ]
