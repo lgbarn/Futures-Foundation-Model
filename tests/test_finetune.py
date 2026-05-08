@@ -1092,6 +1092,76 @@ def test_fold_train_comes_before_val(tmp_path):
     assert max_train_row < min_val_row, (
         f'Train rows extend into val: max_train={max_train_row} min_val={min_val_row}')
 
+@pytest.mark.skipif(_skip_no_parquet(), reason='pyarrow not installed')
+def test_fold_train_start_limits_training_window(tmp_path):
+    """train_start key must exclude rows before it from the training split."""
+    ticker = 'ES'
+    ffm_dir, strategy_dir = _write_fold_parquets(tmp_path, ticker, n=2000)
+
+    fold_no_start = {
+        'name':      'F1',
+        'train_end': '2021-01-05',
+        'val_end':   '2021-01-06',
+        'test_end':  '2021-01-07',
+    }
+    fold_with_start = {
+        'name':      'F1',
+        'train_start': '2021-01-03',
+        'train_end': '2021-01-05',
+        'val_end':   '2021-01-06',
+        'test_end':  '2021-01-07',
+    }
+
+    train_no_start, _, _ = _load_fold_data(
+        fold_no_start, [ticker], ffm_dir, strategy_dir, STRATEGY_COLS, seq_len=SEQ_LEN)
+    train_with_start, _, _ = _load_fold_data(
+        fold_with_start, [ticker], ffm_dir, strategy_dir, STRATEGY_COLS, seq_len=SEQ_LEN)
+
+    if not train_no_start or not train_with_start:
+        pytest.skip('Not enough data in generated parquet to fill both splits')
+
+    # Sliding window must produce fewer training signals than full history
+    sigs_no_start   = sum(len(d.signal_indices) for d in train_no_start)
+    sigs_with_start = sum(len(d.signal_indices) for d in train_with_start)
+    assert sigs_with_start < sigs_no_start, (
+        f'train_start did not reduce training signals: '
+        f'{sigs_with_start} >= {sigs_no_start}')
+
+
+@pytest.mark.skipif(_skip_no_parquet(), reason='pyarrow not installed')
+def test_fold_train_start_default_is_all_history(tmp_path):
+    """Omitting train_start should behave identically to train_start='2000-01-01'."""
+    ticker = 'ES'
+    ffm_dir, strategy_dir = _write_fold_parquets(tmp_path, ticker, n=2000)
+
+    fold_no_key = {
+        'name':      'F1',
+        'train_end': '2021-01-05',
+        'val_end':   '2021-01-06',
+        'test_end':  '2021-01-07',
+    }
+    fold_old_epoch = {
+        'name':        'F1',
+        'train_start': '2000-01-01',
+        'train_end':   '2021-01-05',
+        'val_end':     '2021-01-06',
+        'test_end':    '2021-01-07',
+    }
+
+    train_no_key, _, _   = _load_fold_data(
+        fold_no_key,   [ticker], ffm_dir, strategy_dir, STRATEGY_COLS, seq_len=SEQ_LEN)
+    train_old_epoch, _, _ = _load_fold_data(
+        fold_old_epoch, [ticker], ffm_dir, strategy_dir, STRATEGY_COLS, seq_len=SEQ_LEN)
+
+    if not train_no_key or not train_old_epoch:
+        pytest.skip('Not enough data')
+
+    sigs_no_key    = sum(len(d.signal_indices) for d in train_no_key)
+    sigs_old_epoch = sum(len(d.signal_indices) for d in train_old_epoch)
+    assert sigs_no_key == sigs_old_epoch, (
+        f'Default train_start produced different signal count: '
+        f'{sigs_no_key} vs {sigs_old_epoch}')
+
 
 # =============================================================================
 # 4. Balanced loader — signal oversampling actually works
