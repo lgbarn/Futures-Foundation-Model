@@ -4788,3 +4788,140 @@ def test_realized_r_eval_no_top1_le_mean_and_dd_nonpos():
     assert r['n'] == len(sig)
     assert r['no_top1'] <= r['mean_r'] + 1e-9
     assert r['max_dd'] <= 0.0
+
+
+# =============================================================================
+# Borrow #1 (b2) — realized_r threaded labeler→labels→dataset→eval (back-compat)
+# =============================================================================
+
+from futures_foundation.finetune.trainer import _print_realized_econ
+
+
+class _DirectionLabeler(TrivialLabeler):
+    """Emits the OPTIONAL per-row `direction` column (borrow #1 b2):
+    a handful of long signals so run_labeling computes `realized_r`."""
+
+    @property
+    def name(self):
+        return 'direction'
+
+    def run(self, df_raw, ffm_df, ticker):
+        n      = len(ffm_df)
+        feats  = make_strategy_features(n)
+        sig    = np.zeros(n, dtype=np.int8)
+        direc  = np.zeros(n, dtype=np.float32)
+        for s in (50, 100, 150):
+            sig[s] = 1
+            direc[s] = 1.0                       # long
+        labels = pd.DataFrame({
+            'signal_label': sig,
+            'max_rr':       (sig * 3.0).astype(np.float32),
+            'sl_distance':  np.where(sig > 0, 2.0, 0.0).astype(np.float32),
+            'direction':    direc,
+        })
+        return feats, labels
+
+
+def _labeling_dirs(tmp_path, labeler, ticker='DIR', n=300, trend=0.0):
+    raw_dir = tmp_path / 'raw'; ffm_dir = tmp_path / 'ffm'
+    cache_dir = tmp_path / 'cache'
+    raw_dir.mkdir(); ffm_dir.mkdir()
+    ffm_df = make_ffm_df(n)
+    ffm_df.to_parquet(ffm_dir / f'{ticker}_features.parquet', index=True)
+    base = 5000.0 + np.arange(n) * trend
+    raw_data = pd.DataFrame({
+        'datetime': pd.date_range('2023-01-01', periods=n, freq='5min'),
+        'open':  base,
+        'high':  base + 1.0,
+        'low':   base - 1.0,
+        'close': base,
+        'volume': np.full(n, 500.0),
+    })
+    raw_data.to_csv(raw_dir / f'{ticker}_5min.csv', index=False)
+    run_labeling(labeler, [ticker], str(raw_dir), str(ffm_dir), str(cache_dir))
+    return cache_dir, ticker
+
+
+@pytest.mark.skipif(_skip_no_parquet(), reason='pyarrow not installed')
+def test_run_labeling_adds_realized_r_when_direction(tmp_path):
+    """labeler emits `direction` → cached labels gain a `realized_r` column;
+    non-signal rows are NaN, signal rows are computed (uptrend → finite)."""
+    cache_dir, ticker = _labeling_dirs(tmp_path, _DirectionLabeler(), trend=2.0)
+    lab = pd.read_parquet(cache_dir / f'{ticker}_strategy_labels.parquet')
+    assert 'realized_r' in lab.columns
+    sig_mask = lab['signal_label'].values > 0
+    assert np.isnan(lab['realized_r'].values[~sig_mask]).all()
+    assert np.isfinite(lab['realized_r'].values[sig_mask]).any()
+
+
+@pytest.mark.skipif(_skip_no_parquet(), reason='pyarrow not installed')
+def test_run_labeling_no_realized_r_without_direction(tmp_path):
+    """Back-compat: labeler without `direction` → no `realized_r` column."""
+    cache_dir, ticker = _labeling_dirs(tmp_path, TrivialLabeler(), ticker='ND')
+    lab = pd.read_parquet(cache_dir / f'{ticker}_strategy_labels.parquet')
+    assert 'realized_r' not in lab.columns
+
+
+def test_dataset_emits_realized_r_key_backcompat():
+    """Dataset always emits a `realized_r` item; NaN when column absent."""
+    ffm_df = make_ffm_df(100); strat = make_strategy_features(100)
+    labels = make_labels(100)                       # no realized_r column
+    ds = HybridStrategyDataset(ffm_df, strat, labels, STRATEGY_COLS,
+                               seq_len=SEQ_LEN)
+    item = ds[0]
+    assert 'realized_r' in item
+    assert item['realized_r'].shape == ()
+    assert torch.isnan(item['realized_r'])
+
+
+def test_dataset_surfaces_realized_r_when_present():
+    """`realized_r` column flows through to the dataset item at the last bar."""
+    ffm_df = make_ffm_df(100); strat = make_strategy_features(100)
+    labels = make_labels(100)
+    rr = np.full(len(labels), np.nan, dtype=np.float32)
+    rr[SEQ_LEN - 1] = 2.5                            # last bar of window 0
+    labels = labels.assign(realized_r=rr)
+    ds = HybridStrategyDataset(ffm_df, strat, labels, STRATEGY_COLS,
+                               seq_len=SEQ_LEN)
+    assert ds[0]['realized_r'].item() == pytest.approx(2.5)
+
+
+def test_print_realized_econ_prints_block(capsys):
+    """Finite realized R at predicted-positive rows → econ block with PF/WR."""
+    n = 200
+    conf = np.full(n, 0.40); pred = np.zeros(n, int)
+    realized = np.full(n, np.nan)
+    idx = np.arange(10, 40)
+    conf[idx] = 0.85; pred[idx] = 1
+    realized[idx] = np.where(np.arange(30) % 3 == 0, -1.0, 2.0)
+    _print_realized_econ(conf, pred, realized.tolist(), 'COMBINED')
+    out = capsys.readouterr().out
+    assert 'REALIZED-R ECONOMICS' in out
+    assert 'NOT MFE' in out
+    assert '0.80' in out
+
+
+def test_print_realized_econ_skips_when_all_nan(capsys):
+    """All-NaN realized (no `direction` / pre-borrow cache) → skip w/ notice."""
+    n = 50
+    conf = np.full(n, 0.85); pred = np.ones(n, int)
+    _print_realized_econ(conf, pred, [float('nan')] * n, 'COMBINED')
+    out = capsys.readouterr().out
+    assert 'skipped' in out and 'relabel with force=True' in out
+
+
+def test_print_realized_econ_noop_when_absent(capsys):
+    """None / empty realized arg → no output at all (full back-compat)."""
+    _print_realized_econ(np.array([0.9]), np.array([1]), None, 'F1')
+    _print_realized_econ(np.array([0.9]), np.array([1]), [], 'F1')
+    assert capsys.readouterr().out == ''
+
+
+def test_threshold_table_realized_econ_backcompat(capsys):
+    """_print_test_threshold_table with no all_realized_r key → no crash,
+    no econ block (legacy metrics dicts stay valid)."""
+    metrics = _make_fake_test_metrics(n=200)
+    metrics.pop('all_realized_r', None)
+    _print_test_threshold_table(metrics, 'F1')
+    out = capsys.readouterr().out
+    assert 'REALIZED-R ECONOMICS' not in out

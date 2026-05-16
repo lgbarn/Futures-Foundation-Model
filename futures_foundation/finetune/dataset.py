@@ -58,6 +58,13 @@ class HybridStrategyDataset(Dataset):
                        pd.Series(0, index=features_df.index)).fillna(0).values.astype(np.int64)
         self._labels = labels_df['signal_label'].values.astype(np.int64)
         self._max_rr = labels_df['max_rr'].values.astype(np.float32)
+        # Borrow #1 (b2): realized-R parallel to max_rr (MFE). Back-compat:
+        # absent → all-NaN (eval econ block skips w/ notice). Eval/report
+        # only — never a training target (signal=binary, risk=max_rr).
+        self._realized_r = (
+            labels_df['realized_r'].values.astype(np.float32)
+            if 'realized_r' in labels_df.columns
+            else np.full(len(labels_df), np.nan, dtype=np.float32))
 
         self.signal_indices = [
             i for i in range(len(self.window_starts))
@@ -81,4 +88,5 @@ class HybridStrategyDataset(Dataset):
             'day_of_week':       torch.from_numpy(self._dow[start:end]),
             'signal_label':      torch.tensor(self._labels[last], dtype=torch.long),
             'max_rr':            torch.tensor(self._max_rr[last], dtype=torch.float32),
+            'realized_r':        torch.tensor(self._realized_r[last], dtype=torch.float32),
         }

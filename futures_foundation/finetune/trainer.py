@@ -268,7 +268,6 @@ def run_labeling(
                                  len(ffm_df), ticker)
 
         strategy_feats.to_parquet(feat_path,  index=False)
-        labels_df.to_parquet(label_path, index=False)
 
         # Borrow #1: cache the OHLC+ATR price path aligned 1:1 to ffm_df rows
         # (== labels_df rows) so the eval-stage realized-R backtest can slice
@@ -280,6 +279,31 @@ def run_labeling(
         ohlc['atr'] = (ffm_df['vty_atr_raw'].values
                        if 'vty_atr_raw' in ffm_df.columns else np.nan)
         ohlc.reset_index(drop=True).to_parquet(ohlc_path, index=False)
+
+        # Borrow #1 (b2): when the labeler emits an OPTIONAL per-row
+        # `direction` column (>0 long / <0 short on signal rows), compute
+        # realized-R under the uniform framework exit policy (entry =
+        # next-bar open; exit = generic realized_r_trailing) and persist a
+        # `realized_r` column alongside the labels. Back-compat: absent
+        # `direction` → no `realized_r` column (eval skips w/ notice),
+        # exactly mirroring the _ohlc.parquet pattern. This is eval/report
+        # metadata only — the signal head stays pure binary and the risk
+        # head still trains on max_rr (never on realized_r).
+        if 'direction' in labels_df.columns:
+            sig_pos = np.flatnonzero(labels_df['signal_label'].values > 0)
+            is_long = labels_df['direction'].values[sig_pos] > 0
+            sl_dist = (labels_df['sl_distance'].values[sig_pos]
+                       if 'sl_distance' in labels_df.columns else None)
+            rr = _compute_realized_r(
+                ohlc['open'].values, ohlc['high'].values,
+                ohlc['low'].values, ohlc['close'].values,
+                ohlc['atr'].values, sig_pos, is_long, sl_dist)
+            realized = np.full(len(labels_df), np.nan, dtype=np.float32)
+            realized[sig_pos] = rr
+            labels_df = labels_df.copy()
+            labels_df['realized_r'] = realized
+
+        labels_df.to_parquet(label_path, index=False)
 
         sigs = (labels_df['signal_label'] > 0).sum()
         total_signals += sigs
@@ -478,6 +502,7 @@ def _evaluate(model, loader, loss_fn, device):
     total_loss = 0.0; n_batches = 0
     correct = total = tp = fp = fn = 0
     all_conf = []; all_labels = []; all_preds = []; all_max_rr = []
+    all_realized_r = []
     use_amp = device.type == 'cuda'
 
     with torch.no_grad():
@@ -510,6 +535,7 @@ def _evaluate(model, loader, loss_fn, device):
             all_labels.extend(labels.cpu().tolist())
             all_preds.extend(preds.cpu().tolist())
             all_max_rr.extend(batch['max_rr'].tolist())
+            all_realized_r.extend(batch['realized_r'].tolist())
 
     precision = tp / max(tp + fp, 1)
     recall    = tp / max(tp + fn, 1)
@@ -532,6 +558,7 @@ def _evaluate(model, loader, loss_fn, device):
         'prec_at_80': prec_80, 'n_at_80': n_at_80,
         'all_conf': all_conf, 'all_labels': all_labels,
         'all_preds': all_preds, 'all_max_rr': all_max_rr,
+        'all_realized_r': all_realized_r,
     }
 
 
@@ -770,6 +797,43 @@ def _print_test_threshold_table(test_metrics: dict, fold_name: str, rr_target: f
     print(f'\n  EV@{rr_target:.0f}R = P×{rr_target+1:.0f} − 1  |  '
           f'Breakeven: P≥{breakeven:.1%}  |  '
           f'✅ EV>0 & N≥10  ⚠️  EV>0 or approaching  ❌ not viable')
+
+    _print_realized_econ(conf_arr, pred_arr,
+                         test_metrics.get('all_realized_r'), fold_name)
+
+
+def _print_realized_econ(conf_arr, pred_arr, realized_arr, scope: str) -> None:
+    """Borrow #1: realized-R economics, printed ALONGSIDE the MFE (max_rr)
+    AvgRR so the two R's are never conflated. Filtered to predicted-positive
+    rows with a resolved realized R (a real entry under the uniform framework
+    exit policy). Back-compat: skipped with an explicit notice when no
+    realized_r is available (labeler emitted no `direction` column, or the
+    cache predates borrow #1 — relabel with force=True to enable)."""
+    if realized_arr is None or len(realized_arr) == 0:
+        return
+    ra = np.asarray(realized_arr, float)
+    pa = np.asarray(pred_arr)
+    ca = np.asarray(conf_arr, float)
+    if not np.isfinite(ra).any():
+        print(f'\n  💰 Realized-R econ ({scope}): — skipped (no `realized_r`; '
+              f'labeler emitted no `direction` column or cache predates '
+              f'borrow #1 — relabel with force=True to enable)')
+        return
+    print(f'\n  💰 REALIZED-R ECONOMICS ({scope}) — realized exit, NOT MFE/max_rr')
+    print(f'  {"Thresh":>6}  {"N":>5}  {"MeanR":>7}  {"WR":>6}  '
+          f'{"PF":>6}  {"MaxDD":>8}  {"no-top1%":>9}')
+    for thresh in [0.50, 0.60, 0.70, 0.80, 0.90]:
+        m = (ca >= thresh) & (pa > 0)
+        if m.sum() == 0:
+            continue
+        st = _r_stats(ra[m])
+        if st['n'] == 0:
+            continue
+        pf    = st['profit_factor']
+        pf_s  = f'{pf:>6.2f}' if pf < 9999 else '   ∞  '
+        print(f'  {thresh:>6.2f}  {st["n"]:>5}  {st["mean_r"]:>+7.2f}  '
+              f'{st["win_rate"]:>5.1%}  {pf_s}  {st["max_dd"]:>+8.2f}  '
+              f'{st["no_top1"]:>+9.2f}')
 
 
 def _print_confidence_calibration(test_metrics: dict) -> None:
@@ -1788,6 +1852,7 @@ def print_eval_summary(
     Equivalent to Cell 5 in the strategy notebook.
     """
     all_conf_c = []; all_labels_c = []; all_preds_c = []; all_rr_c = []
+    all_realized_c = []
     for fname, metrics in fold_results.items():
         if fname == '_model' or metrics is None:
             continue
@@ -1795,6 +1860,7 @@ def print_eval_summary(
         all_labels_c.extend(metrics['all_labels'])
         all_preds_c.extend(metrics['all_preds'])
         all_rr_c.extend(metrics['all_max_rr'])
+        all_realized_c.extend(metrics.get('all_realized_r') or [])
 
     if not all_labels_c:
         print('No fold results available.')
@@ -1855,6 +1921,8 @@ def print_eval_summary(
         pl_r    = wins_rr.sum() - fp
         print(f'  {fname}: {int(tp+fp)} trades | Prec:{tp/max(tp+fp,1):.3f} | '
               f'AvgRR:{avg_rr:.2f} | PF:{pf_str} | {pl_r:+.1f}R')
+
+    _print_realized_econ(all_conf, all_preds, all_realized_c, 'COMBINED')
 
     if baseline_wr:
         baseline_avg = np.mean(list(baseline_wr.values()))
@@ -2199,24 +2267,22 @@ def run_shuffle_audit(labeler, config, folds: list, tickers: list, **kw) -> dict
 # Borrow #1 — realized-R economic eval (reuses generic realized_r_trailing)
 # =============================================================================
 
-def _realized_r_eval(o, h, l, c, atr, sig_idx, is_long, sl_dist,
-                     trail_atr_k: float = 2.0, activate_r: float = 1.0,
-                     max_hold: int = 130) -> dict:
-    """Realized-R economic stats for predicted-positive signals.
+def _compute_realized_r(o, h, l, c, atr, sig_idx, is_long, sl_dist,
+                        trail_atr_k: float = 2.0, activate_r: float = 1.0,
+                        max_hold: int = 130) -> np.ndarray:
+    """Per-signal realized R under the uniform framework exit policy
+    (entry = NEXT bar open after the signal; risk = labeler sl_distance,
+    atr fallback; exit = generic unit-tested `realized_r_trailing`).
 
-    Uniform framework exit policy (documented choice, matches the XGBoost
-    pipeline): entry = NEXT bar's open after the signal bar; risk =
-    labeler sl_distance (atr fallback if missing); exit = the generic,
-    unit-tested `realized_r_trailing`. No new exit math here — pure
-    aggregation. Returns {n, mean_r, win_rate, profit_factor, max_dd,
-    no_top1} (R units; profit_factor = ΣR+ / |ΣR-|; max_dd on cumulative-R
-    equity; no_top1 = mean with top 1% trades removed = tail-fragility)."""
+    Returns an array of len(sig_idx); entries that cannot resolve
+    (i+1 out of range / non-finite entry / unusable risk) are np.nan so
+    the caller can scatter values back to row positions or drop them."""
     from futures_foundation.primitives import realized_r_trailing
     o = np.asarray(o, float); h = np.asarray(h, float)
     l = np.asarray(l, float); c = np.asarray(c, float)
     atr = np.asarray(atr, float)
     n = len(c)
-    rs = []
+    out = np.full(len(sig_idx), np.nan, dtype=float)
     for k, idx in enumerate(sig_idx):
         i = int(idx)
         if i + 1 >= n:
@@ -2236,8 +2302,16 @@ def _realized_r_eval(o, h, l, c, atr, sig_idx, is_long, sl_dist,
             h, l, c, entry_idx=i + 1, is_long=long_, entry_price=entry,
             sl_price=sl_price, atr=(a if np.isfinite(a) and a > 0 else risk),
             trail_atr_k=trail_atr_k, activate_r=activate_r, max_hold=max_hold)
-        rs.append(res['realized_r'])
+        out[k] = res['realized_r']
+    return out
+
+
+def _r_stats(rs) -> dict:
+    """Aggregate realized-R economic stats. {n, mean_r, win_rate,
+    profit_factor (ΣR+/|ΣR-|), max_dd (cumulative-R equity), no_top1
+    (mean with top 1% removed = tail-fragility)}. NaNs are dropped."""
     rs = np.asarray(rs, float)
+    rs = rs[np.isfinite(rs)]
     if len(rs) == 0:
         return {'n': 0, 'mean_r': 0.0, 'win_rate': 0.0,
                 'profit_factor': 0.0, 'max_dd': 0.0, 'no_top1': 0.0}
@@ -2249,3 +2323,13 @@ def _realized_r_eval(o, h, l, c, atr, sig_idx, is_long, sl_dist,
             'profit_factor': (gp / gl) if gl > 0 else float('inf'),
             'max_dd': float((eq - peak).min()),
             'no_top1': float(notop.mean())}
+
+
+def _realized_r_eval(o, h, l, c, atr, sig_idx, is_long, sl_dist,
+                     trail_atr_k: float = 2.0, activate_r: float = 1.0,
+                     max_hold: int = 130) -> dict:
+    """Back-compat wrapper: per-signal realized R then aggregate stats.
+    Equivalent to the original behavior (skipped signals dropped)."""
+    rs = _compute_realized_r(o, h, l, c, atr, sig_idx, is_long, sl_dist,
+                             trail_atr_k, activate_r, max_hold)
+    return _r_stats(rs)
