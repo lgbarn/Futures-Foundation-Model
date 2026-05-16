@@ -4699,3 +4699,92 @@ def test_audit_multifold_one_fail_fails_overall():
 
 def test_run_shuffle_audit_is_exported():
     assert callable(run_shuffle_audit)
+
+
+# =============================================================================
+# Borrow #1 — realized-R economic eval (pure aggregation, no training)
+# =============================================================================
+
+from futures_foundation.finetune.trainer import _realized_r_eval
+
+
+def _ramp(n=30):
+    o = np.full(n, 100.0); h = np.full(n, 100.1)
+    l = np.full(n, 99.9);  c = np.full(n, 100.0)
+    return o, h, l, c
+
+
+def test_realized_r_eval_empty_is_zeroed():
+    o, h, l, c = _ramp()
+    r = _realized_r_eval(o, h, l, c, np.full(30, 1.0), [], [], [])
+    assert r == {'n': 0, 'mean_r': 0.0, 'win_rate': 0.0,
+                 'profit_factor': 0.0, 'max_dd': 0.0, 'no_top1': 0.0}
+
+
+def test_realized_r_eval_long_winner():
+    o, h, l, c = _ramp(30)
+    atr = np.full(30, 1.0)
+    # signal idx 5 -> entry o[6]=100, risk=1 (sl_dist). Ramp up then drop so
+    # the trailing exit locks a positive R.
+    for j in range(6, 12):
+        h[j] = 100.0 + (j - 5) * 2.0
+        l[j] = 99.5 + (j - 5) * 2.0
+        c[j] = 99.8 + (j - 5) * 2.0
+    h[12], l[12], c[12] = 110.0, 95.0, 96.0          # reversal -> trail hit
+    r = _realized_r_eval(o, h, l, c, atr, [5], [True], [1.0],
+                         trail_atr_k=2.0, activate_r=1.0, max_hold=50)
+    assert r['n'] == 1
+    assert r['mean_r'] > 0 and r['win_rate'] == 1.0
+
+
+def test_realized_r_eval_long_stopped_is_negative():
+    o, h, l, c = _ramp(20)
+    atr = np.full(20, 1.0)
+    l[7] = 98.0                                       # entry o[6]=100, sl=99
+    r = _realized_r_eval(o, h, l, c, atr, [5], [True], [1.0])
+    assert r['n'] == 1
+    assert r['mean_r'] == pytest.approx(-1.0, abs=1e-6)
+    assert r['win_rate'] == 0.0 and r['max_dd'] <= 0.0
+
+
+def test_realized_r_eval_atr_fallback_when_sl_missing():
+    o, h, l, c = _ramp(20)
+    atr = np.full(20, 1.0)
+    l[7] = 98.0
+    # sl_dist NaN -> risk falls back to atr (=1.0): same -1R outcome
+    r = _realized_r_eval(o, h, l, c, atr, [5], [True], [float('nan')])
+    assert r['n'] == 1 and r['mean_r'] == pytest.approx(-1.0, abs=1e-6)
+
+
+def test_realized_r_eval_short_winner():
+    o, h, l, c = _ramp(30)
+    atr = np.full(30, 1.0)
+    for j in range(6, 12):
+        l[j] = 100.0 - (j - 5) * 2.0
+        h[j] = 100.5 - (j - 5) * 2.0
+        c[j] = 100.2 - (j - 5) * 2.0
+    h[12], l[12], c[12] = 105.0, 90.0, 104.0          # reversal up -> trail
+    r = _realized_r_eval(o, h, l, c, atr, [5], [False], [1.0],
+                         trail_atr_k=2.0, activate_r=1.0, max_hold=50)
+    assert r['n'] == 1 and r['mean_r'] > 0
+
+
+def test_realized_r_eval_no_top1_le_mean_and_dd_nonpos():
+    # mix: several -1R + one big winner -> no_top1 (tail removed) < mean
+    o = np.full(60, 100.0); h = np.full(60, 100.1)
+    l = np.full(60, 99.9);  c = np.full(60, 100.0); atr = np.full(60, 1.0)
+    sig, isl, sld = [], [], []
+    for s in range(2, 50, 5):
+        sig.append(s); isl.append(True); sld.append(1.0)
+        l[s + 1] = 98.0                                # each -> ~ -1R
+    # turn the last one into a monster winner
+    s = sig[-1]
+    l[s + 1] = 99.95
+    for j in range(s + 1, s + 8):
+        h[j] = 100.0 + (j - s) * 5.0; l[j] = 99.9 + (j - s) * 5.0
+        c[j] = 100.0 + (j - s) * 5.0
+    h[s + 8], l[s + 8], c[s + 8] = 140.0, 95.0, 96.0
+    r = _realized_r_eval(o, h, l, c, atr, sig, isl, sld, max_hold=60)
+    assert r['n'] == len(sig)
+    assert r['no_top1'] <= r['mean_r'] + 1e-9
+    assert r['max_dd'] <= 0.0

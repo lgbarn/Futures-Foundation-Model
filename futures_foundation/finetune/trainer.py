@@ -217,10 +217,16 @@ def run_labeling(
         feat_path  = os.path.join(cache_dir, f'{ticker}_strategy_features.parquet')
         label_path = os.path.join(cache_dir, f'{ticker}_strategy_labels.parquet')
 
+        ohlc_path = os.path.join(cache_dir, f'{ticker}_ohlc.parquet')
+
         if not force and os.path.exists(feat_path) and os.path.exists(label_path):
             cached = pd.read_parquet(label_path)
             sigs   = (cached['signal_label'] > 0).sum()
-            print(f'  {ticker}: cached — {len(cached):,} bars, {sigs} signals')
+            note = ('' if os.path.exists(ohlc_path)
+                    else '  (no _ohlc.parquet — borrow-#1 economic eval will '
+                         'skip this ticker until a relabel with force=True)')
+            print(f'  {ticker}: cached — {len(cached):,} bars, {sigs} signals'
+                  f'{note}')
             total_signals += sigs
             total_bars    += len(cached)
             continue
@@ -263,6 +269,17 @@ def run_labeling(
 
         strategy_feats.to_parquet(feat_path,  index=False)
         labels_df.to_parquet(label_path, index=False)
+
+        # Borrow #1: cache the OHLC+ATR price path aligned 1:1 to ffm_df rows
+        # (== labels_df rows) so the eval-stage realized-R backtest can slice
+        # it identically to features/labels. atr = vty_atr_raw (kept metadata
+        # in the prepared parquet; NOT a model feature, so absent from the
+        # eval feature matrix — must be carried here for the trail).
+        ohlc = df_raw[['open', 'high', 'low', 'close']].reindex(ffm_df.index)
+        ohlc.insert(0, 'datetime', ffm_df['_datetime'].values)
+        ohlc['atr'] = (ffm_df['vty_atr_raw'].values
+                       if 'vty_atr_raw' in ffm_df.columns else np.nan)
+        ohlc.reset_index(drop=True).to_parquet(ohlc_path, index=False)
 
         sigs = (labels_df['signal_label'] > 0).sum()
         total_signals += sigs
@@ -2176,3 +2193,59 @@ def run_shuffle_audit(labeler, config, folds: list, tickers: list, **kw) -> dict
                                     min_signals)
     print_shuffle_audit(result)
     return result
+
+
+# =============================================================================
+# Borrow #1 — realized-R economic eval (reuses generic realized_r_trailing)
+# =============================================================================
+
+def _realized_r_eval(o, h, l, c, atr, sig_idx, is_long, sl_dist,
+                     trail_atr_k: float = 2.0, activate_r: float = 1.0,
+                     max_hold: int = 130) -> dict:
+    """Realized-R economic stats for predicted-positive signals.
+
+    Uniform framework exit policy (documented choice, matches the XGBoost
+    pipeline): entry = NEXT bar's open after the signal bar; risk =
+    labeler sl_distance (atr fallback if missing); exit = the generic,
+    unit-tested `realized_r_trailing`. No new exit math here — pure
+    aggregation. Returns {n, mean_r, win_rate, profit_factor, max_dd,
+    no_top1} (R units; profit_factor = ΣR+ / |ΣR-|; max_dd on cumulative-R
+    equity; no_top1 = mean with top 1% trades removed = tail-fragility)."""
+    from futures_foundation.primitives import realized_r_trailing
+    o = np.asarray(o, float); h = np.asarray(h, float)
+    l = np.asarray(l, float); c = np.asarray(c, float)
+    atr = np.asarray(atr, float)
+    n = len(c)
+    rs = []
+    for k, idx in enumerate(sig_idx):
+        i = int(idx)
+        if i + 1 >= n:
+            continue
+        a = atr[i + 1]
+        risk = float(sl_dist[k]) if sl_dist is not None else float('nan')
+        if not np.isfinite(risk) or risk <= 0:          # atr fallback
+            if not np.isfinite(a) or a <= 0:
+                continue
+            risk = a
+        entry = o[i + 1]
+        if not np.isfinite(entry):
+            continue
+        long_ = bool(is_long[k])
+        sl_price = entry - risk if long_ else entry + risk
+        res = realized_r_trailing(
+            h, l, c, entry_idx=i + 1, is_long=long_, entry_price=entry,
+            sl_price=sl_price, atr=(a if np.isfinite(a) and a > 0 else risk),
+            trail_atr_k=trail_atr_k, activate_r=activate_r, max_hold=max_hold)
+        rs.append(res['realized_r'])
+    rs = np.asarray(rs, float)
+    if len(rs) == 0:
+        return {'n': 0, 'mean_r': 0.0, 'win_rate': 0.0,
+                'profit_factor': 0.0, 'max_dd': 0.0, 'no_top1': 0.0}
+    gp = float(rs[rs > 0].sum()); gl = float(-rs[rs < 0].sum())
+    eq = np.cumsum(rs); peak = np.maximum.accumulate(eq)
+    notop = np.sort(rs)[:max(1, int(len(rs) * 0.99))]
+    return {'n': int(len(rs)), 'mean_r': float(rs.mean()),
+            'win_rate': float((rs > 0).mean()),
+            'profit_factor': (gp / gl) if gl > 0 else float('inf'),
+            'max_dd': float((eq - peak).min()),
+            'no_top1': float(notop.mean())}
