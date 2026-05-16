@@ -81,6 +81,8 @@ def compute_stats(name: str, datetimes, trade_dollars, starting_equity: float,
         'largest_loss_dollars': float(tp.min()) if n else 0.0,
         'profit_factor': gross_win / gross_loss if gross_loss else float('inf'),
         'expectancy_dollars': float(tp.mean()) if n else 0.0,
+        'avg_win_dollars': float(wins.mean()) if len(wins) else 0.0,
+        'avg_loss_dollars': float(losses.mean()) if len(losses) else 0.0,
         'avg_contracts': float(contracts.mean()) if contracts is not None and n else 0.0,
         'max_contracts_used': int(contracts.max()) if contracts is not None and n else 0,
         'daily_returns': daily,
@@ -99,6 +101,8 @@ def format_stats(s: dict) -> str:
         f"    max_drawdown={s['max_dd_pct']:.1%}  (${s['max_dd_dollars']:,.0f})\n"
         f"    biggest_win=${s['biggest_win_dollars']:,.0f}   "
         f"largest_loss=${s['largest_loss_dollars']:,.0f}\n"
+        f"    avg_win=${s['avg_win_dollars']:,.0f}   "
+        f"avg_loss=${s['avg_loss_dollars']:,.0f}\n"
         f"    profit_factor={s['profit_factor']:.2f}   "
         f"expectancy=${s['expectancy_dollars']:,.0f}/trade"
     )
@@ -114,7 +118,7 @@ def print_stats(name: str, datetimes, trade_dollars, starting_equity, contracts=
 # ── Compact one-line form, for sweep comparison tables ──
 ROW_HEADER = (f"  {'variant':<14}{'trades':>7}{'win%':>7}{'avgN':>6}{'PnL$':>12}"
               f"{'CAGR%':>9}{'Sortino':>9}{'Calmar':>8}{'maxDD$':>11}"
-              f"{'bigWin$':>10}{'maxLoss$':>11}")
+              f"{'bigWin$':>10}{'maxLoss$':>11}{'avgWin$':>10}{'avgLoss$':>10}")
 
 
 def format_row(s: dict) -> str:
@@ -123,4 +127,5 @@ def format_row(s: dict) -> str:
             f"{s['avg_contracts']:>6.1f}{s['pnl_dollars']:>12,.0f}"
             f"{s['cagr']*100:>8.0f}%{s['sortino']:>9.2f}{s['calmar']:>8.1f}"
             f"{s['max_dd_dollars']:>11,.0f}{s['biggest_win_dollars']:>10,.0f}"
-            f"{s['largest_loss_dollars']:>11,.0f}")
+            f"{s['largest_loss_dollars']:>11,.0f}{s['avg_win_dollars']:>10,.0f}"
+            f"{s['avg_loss_dollars']:>10,.0f}")
