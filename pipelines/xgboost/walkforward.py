@@ -19,7 +19,10 @@ def walk_forward_windows(index: pd.DatetimeIndex,
     """Yield (train_mask, test_mask) boolean arrays — month-aligned rolling
     unanchored windows. Stride = test_months (retrain monthly)."""
     idx = pd.DatetimeIndex(pd.to_datetime(index))
-    periods = idx.to_period('M')
+    # drop tz explicitly before to_period (month bucketing is tz-immaterial;
+    # silences the "will drop timezone" warning, deterministic on wall-clock)
+    _idx = idx.tz_localize(None) if idx.tz is not None else idx
+    periods = _idx.to_period('M')
     months = periods.unique().sort_values()
     step = test_months
     s = 0

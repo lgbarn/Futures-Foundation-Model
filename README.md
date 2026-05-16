@@ -341,6 +341,43 @@ verify_backbone('/models/backbone_v10/')
 
 ---
 
+## XGBoost Pipeline (Standalone)
+
+**`pipelines/xgboost/` — a gradient-boosted direction classifier, fully independent of the transformer backbone.**
+
+Not every strategy needs a 256-dim transformer. Some need a fast, robust tabular model on the same causal features. The XGBoost pipeline lives under a new top-level **`pipelines/`** package (one subfolder per standalone pipeline) and shares **only** feature engineering with FFM — `derive_features` (the 68 causal features as of the look-ahead fix). It does not touch `model.py`, pretraining, or the fine-tune framework.
+
+**What it does:** every RTH bar is a candidate (no hand-coded pattern); a **V2 session-calibrated triple-barrier** labeler defines the target (long / no-trade / short); XGBoost predicts direction from the 68 features; a **hybrid Rogers-Satchell ATR/structure trailing stop** manages the exit; **rolling 3-month-train / 1-month-test** walk-forward with a per-window Optuna study (TPE, 300 trials). The tuning objective is **CAGR·√Sortino with a −20% DD penalty** — a *product*, so the optimizer cannot win by learning to not trade (the exact degenerate collapse that sinks naive classifiers).
+
+### Add a strategy — same ergonomics as the fine-tune framework
+
+```python
+from pipelines.xgboost.base import XGBStrategyLabeler, register
+
+@register("my_strategy")
+class MyLabeler(XGBStrategyLabeler):
+    name = "my_strategy"
+    def __init__(self, *, bar_minutes): self.bar_minutes = bar_minutes
+    def label(self, df):        # df: datetime, OHLC, atr  →  Series of {-1,0,+1}
+        return my_direction_logic(df)
+```
+
+```bash
+python -m pipelines.xgboost.train --timeframe 5m --instrument ES --labeler my_strategy --trials 300
+```
+```python
+from pipelines.xgboost.train import run_pipeline
+run_pipeline(MyLabeler(bar_minutes=5), timeframe='5m', instrument='ES', trials=300)
+```
+
+`V2TripleBarrierLabeler` is the registered default (`v2_triple_barrier`). The harness owns features / walk-forward / Optuna / trail / gate / `*.joblib` artifact + `XGBPredictor` inference wrapper; the labeler owns only the `{-1,0,+1}` target (and optionally `feature_cols`, default = all 68). `--max-windows N` bounds the walk-forward for fast smoke runs. Optional RF-gate / HMM (spec §10/11) are intentionally not built.
+
+> **Verdict gate (non-negotiable):** a model is credible only if **every OOS month is profitable (PF > 1)** on the *full multi-year* rolling walk-forward — not a smoke window. The plug-in makes strategies cheap to *try*; the gate is what makes one *real*.
+
+Build spec: [`docs/xgboost-pipeline.md`](docs/xgboost-pipeline.md). Extra deps (in `requirements.txt`): `xgboost>=2.0`, `optuna>=3.0`, `joblib>=1.3`.
+
+---
+
 ## Architecture
 
 ```
@@ -556,10 +593,25 @@ Futures-Foundation-Model/
 │       ├── dataset.py          # HybridStrategyDataset
 │       ├── losses.py           # FocalLoss
 │       └── trainer.py          # run_finetune, run_labeling, run_walk_forward, print_eval_summary
-├── tests/                      # Unit tests (492+ total)
+├── pipelines/                  # ★ Standalone pipelines (transformer-independent)
+│   ├── __init__.py
+│   └── xgboost/                # XGBoost direction classifier (spec: docs/xgboost-pipeline.md)
+│       ├── base.py             # XGBStrategyLabeler ABC + registry
+│       ├── labeler.py          # V2 session triple-barrier (registered default)
+│       ├── trail.py            # Rogers-Satchell hybrid ATR/structure trail
+│       ├── backtest.py         # exit-priority trade sim → per-trade returns
+│       ├── walkforward.py      # rolling 3:1 unanchored splitter
+│       ├── objective.py        # combined CAGR·√Sortino Optuna objective
+│       ├── tuner.py            # Optuna TPE study (lazy xgboost/optuna)
+│       ├── train.py            # run_pipeline() API + CLI
+│       └── predictor.py        # XGBPredictor inference wrapper
+├── docs/
+│   └── xgboost-pipeline.md     # XGBoost pipeline build specification
+├── tests/                      # Unit tests (518+ total)
 │   ├── test_model.py           # Backbone + heads
 │   ├── test_pretrain.py        # Pretraining pipeline
 │   ├── test_finetune.py        # Fine-tuning framework (incl. FFM field coverage, FoldHealthMonitor)
+│   ├── test_xgboost_pipeline.py # XGBoost pipeline (objective, V2 labeler, trail, walk-forward, plug-in)
 │   ├── test_features_crt.py    # CRT sweep features
 │   ├── test_features_core.py   # Core feature groups
 │   ├── test_labels.py          # Label generation
@@ -577,6 +629,7 @@ Futures-Foundation-Model/
 
 | Version | Description |
 |---------|-------------|
+| **v1.2** | **`pipelines/xgboost` — standalone XGBoost direction pipeline**, independent of the transformer (reuses only causal `derive_features`/68 features): V2 session triple-barrier labeler, Rogers-Satchell hybrid ATR/structure trail, rolling 3:1 unanchored walk-forward, Optuna TPE combined `CAGR·√Sortino` objective (product → can't win by not trading), every-OOS-month-PF>1 gate, `XGBPredictor` artifact; `XGBStrategyLabeler` ABC + registry give finetune-parity strategy plug-in (`run_pipeline()` API + `--labeler` CLI; `--max-windows` bounds smoke runs); 26 pipeline tests. Also — finetune/pretrain robustness guards: `run_pretrain` fails fast on `seq_len > max_sequence_length`; `load_backbone` hard-fails on architecture mismatch instead of silently dropping `position_embeddings` under `strict=False`; `_config_hash` now includes `ffm_config` arch so a stale resume cannot poison a re-run; mandatory no-look-ahead causal-parity discipline (every feature proven batch==streaming per bar) |
 | **v1.1** | `FoldHealthMonitor` — stateful post-fold pathology detector; 7 signals (EARLY_EPOCH, WEIGHT_LOCK, P80_DECLINE, VAL_TEST_GAP, N_COLLAPSE, CONFIDENCE_FLAT, ZERO_SIGNAL_FOLD); prints immediately on detection + consolidated `summary()` after all folds; always prints feature importance `cos_sim` between folds even when healthy so the WEIGHT_LOCK fix is visually confirmed; `train_start` fold key — 18-month sliding window training prevents weight lock in `continue_from` runs by forcing each fold to re-adapt to its local regime; `val_p80` stored in test_metrics from the selected checkpoint to power VAL_TEST_GAP; 10 new health monitor tests (492 total) |
 | **v1.0** | `futures_foundation.pretrain` — full backbone pretraining pipeline in the library; `prepare_data()` derives 68 features + 4 labels from raw OHLCV CSVs (idempotent, skips cached); `run_pretrain()` full training loop with AMP (bfloat16/float16), per-task overfit guards, collapse detection, backbone val loss checkpointing (structure excluded — overfits early while other heads improve); `verify_backbone()` confirms checkpoint health and instrument embedding diversity; `PretrainConfig` dataclass with v8/v9 defaults baked in; Colab script reduced from ~990 → ~90 lines; stale `scripts/pretrain.py` and `scripts/prepare_data.py` (42-feature era) deleted; 21 new unit tests (452 total) |
 | **v0.9** | `run_finetune()` — single-call full pipeline replacing the prior 3-step sequence (labeling + walk-forward + eval); accepts `on_epoch_end` and `on_fold_complete` callbacks; auto-scaled `n_stable_min` — trainer computes `effective_n_stable = min(cfg, max(10, int(val_pos_count × 0.08)))` per fold from actual val signal count so later walk-forward folds with shorter val windows no longer fail to produce stable checkpoints |
@@ -649,6 +702,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 - [x] **`futures_foundation.pretrain` — single-call pretraining pipeline** — `prepare_data`, `run_pretrain`, `verify_backbone`; per-task overfit guards, AMP, backbone val loss checkpointing, instrument similarity verification; captures all v8/v9 fixes in the library; Colab reduced to ~90 lines
 - [x] **`FoldHealthMonitor` — automatic training pathology detection** — 7 signals (EARLY_EPOCH, WEIGHT_LOCK, P80_DECLINE, VAL_TEST_GAP, N_COLLAPSE, CONFIDENCE_FLAT, ZERO_SIGNAL_FOLD); fires immediately per fold + consolidated summary; always prints feature weight cos_sim between folds to confirm WEIGHT_LOCK fix is working
 - [x] **`train_start` fold key** — sliding window training (e.g. 18 months) prevents weight lock in `continue_from` runs; each fold re-adapts to its local regime rather than being anchored to the prior run's initialization; backward-compatible (folds without `train_start` use full history)
+- [x] **`pipelines/` — standalone non-transformer pipeline package** (one subfolder per pipeline; shares only `derive_features`)
+- [x] **XGBoost direction pipeline** — V2 session triple-barrier + Rogers-Satchell hybrid trail + rolling 3:1 walk-forward + Optuna combined objective + every-OOS-month-PF>1 gate
+- [x] **`XGBStrategyLabeler` plug-in** — finetune-parity strategy customization for XGBoost (`run_pipeline()` API + `--labeler` registry)
+- [x] **Robustness guards** — `seq_len`>`max_sequence_length` fail-fast; `load_backbone` arch-mismatch hard-fail; `_config_hash` includes ffm arch (stale-resume poison fix); no-look-ahead causal-parity rule
+- [ ] Full multi-year walk-forward validation of the XGBoost pipeline (every OOS month PF>1, incl. 2022/2025)
 - [ ] Additional strategy implementations (ORB, ICT breaker blocks)
 - [ ] Multi-timeframe input support
 

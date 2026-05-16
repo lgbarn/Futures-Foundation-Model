@@ -18,6 +18,10 @@ the backtest exit-priority (spec 7.6).
 import numpy as np
 import pandas as pd
 
+from .base import XGBStrategyLabeler, register
+
+LABELING_VERSION = 'v2.1'
+
 # session -> (tp_mult, sl_mult, window_minutes). Every session has TP >= SL
 # (correct R:R orientation — the whole point of V2 vs the broken V1).
 _SESSIONS = {
@@ -47,7 +51,11 @@ def _first_true(mask: np.ndarray) -> int:
     return int(nz[0]) if nz.size else -1
 
 
-class TripleBarrierV2Labeler:
+@register("v2_triple_barrier")
+class TripleBarrierV2Labeler(XGBStrategyLabeler):
+    """Built-in default strategy. Registered name: 'v2_triple_barrier'."""
+    name = "v2_triple_barrier"
+
     def __init__(self, *, bar_minutes: int):
         if bar_minutes not in (3, 5):
             raise ValueError(f'bar_minutes must be 3 or 5, got {bar_minutes}')
@@ -57,6 +65,10 @@ class TripleBarrierV2Labeler:
                       for s, (_, _, w) in _SESSIONS.items()}
         for s, (tp, sl, _) in _SESSIONS.items():
             assert tp >= sl, f'V2 invariant violated: {s} TP {tp} < SL {sl}'
+
+    def config_dict(self) -> dict:
+        return {'version': LABELING_VERSION, 'bar_minutes': self.bar_minutes,
+                'sessions': _SESSIONS, 'rth': [_RTH_START, _RTH_END]}
 
     def label(self, df: pd.DataFrame) -> pd.Series:
         """df: rows aligned to the feature matrix, columns

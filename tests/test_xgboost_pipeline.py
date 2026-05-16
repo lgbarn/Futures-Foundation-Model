@@ -243,3 +243,64 @@ def test_backtest_long_trail_out_profit_single_position():
     assert res['stats']['trades'] == 1                  # one position at a time
     t = res['trades'][0]
     assert t['dir'] == 1 and t['entry_idx'] == 15
+
+
+# ── plug-in contract (XGBStrategyLabeler / registry) ─────────────────────────
+
+from pipelines.xgboost.base import (
+    XGBStrategyLabeler, register, get_labeler, LABELERS,
+)
+import pipelines.xgboost.labeler  # noqa: F401 — registers v2_triple_barrier
+
+
+def test_v2_is_registered_and_resolves():
+    assert 'v2_triple_barrier' in LABELERS
+    lab = get_labeler('v2_triple_barrier', bar_minutes=5)
+    assert isinstance(lab, XGBStrategyLabeler)
+    assert lab.name == 'v2_triple_barrier'
+    assert len(lab.feature_cols()) == 68          # default = FFM 68
+    assert 'version' in lab.config_dict()
+
+
+def test_unknown_labeler_raises():
+    with pytest.raises(KeyError):
+        get_labeler('does_not_exist', bar_minutes=5)
+
+
+def test_abc_requires_label():
+    with pytest.raises(TypeError):
+        XGBStrategyLabeler()                       # abstract: label() missing
+
+
+def test_custom_labeler_plugs_in():
+    @register("unit_test_dummy")
+    class Dummy(XGBStrategyLabeler):
+        name = "unit_test_dummy"
+        def __init__(self, *, bar_minutes):
+            self.bar_minutes = bar_minutes
+        def label(self, df):
+            # trivial alternating directional target
+            import numpy as _np
+            return pd.Series(_np.where(np.arange(len(df)) % 2, 1, -1),
+                             index=df.index)
+    lab = get_labeler("unit_test_dummy", bar_minutes=5)
+    out = lab.label(pd.DataFrame({'datetime': pd.date_range(
+        '2024-01-02 09:30', periods=6, freq='5min', tz='America/New_York'),
+        'open': 1, 'high': 1, 'low': 1, 'close': 1, 'atr': 1.0}))
+    assert set(np.unique(out)).issubset({-1, 0, 1})
+    assert lab.feature_cols() == get_labeler(
+        'v2_triple_barrier', bar_minutes=5).feature_cols()   # default 68
+    del LABELERS["unit_test_dummy"]                # keep registry clean
+
+
+def test_duplicate_register_raises():
+    @register("dup_x")
+    class _A(XGBStrategyLabeler):
+        name = "dup_x"
+        def label(self, df): return pd.Series([], dtype=int)
+    with pytest.raises(ValueError):
+        @register("dup_x")
+        class _B(XGBStrategyLabeler):
+            name = "dup_x"
+            def label(self, df): return pd.Series([], dtype=int)
+    del LABELERS["dup_x"]
