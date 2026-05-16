@@ -524,7 +524,7 @@ def run_pretrain(
 
     print(f"\n{'='*60}")
     print(f'  PRETRAINING — {config.epochs} epochs | {len(train_loader)} batches/epoch')
-    print(f'  Context: {config.seq_len} bars × 5min = {config.seq_len*5/60:.1f}h')
+    print(f'  Context: {config.seq_len} bars/sequence')
     print(f'  Overfitting: max_ratio={config.max_ratio}  ratio_patience={config.ratio_patience}')
     print(f'  Random baseline: {bl_str}')
     print(f"{'='*60}\n")
