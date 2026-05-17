@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pipelines.xgboost.objective import (
+from pipelines.common.objective import (
     calc_cagr, calc_sortino_ratio, calc_max_drawdown, combined_objective,
 )
 from pipelines.xgboost.labeler import TripleBarrierV2Labeler
@@ -181,7 +181,7 @@ def test_ms_hybrid_long_picks_tighter():
 
 # ── walkforward ──────────────────────────────────────────────────────────────
 
-from pipelines.xgboost.walkforward import walk_forward_windows, optuna_holdout
+from pipelines.common.walkforward import walk_forward_windows, optuna_holdout
 
 
 def test_walk_forward_rolling_unanchored_3to1():

@@ -11,7 +11,7 @@ tests) import fine before the owner installs the deps.
 import numpy as np
 import pandas as pd
 
-from .objective import combined_objective, PERIODS_PER_YEAR
+from pipelines.common.objective import combined_objective, PERIODS_PER_YEAR
 from .backtest import run_backtest
 
 # spec section 6 — tight anti-overfit bounds (do NOT widen)

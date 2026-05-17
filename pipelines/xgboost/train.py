@@ -21,10 +21,10 @@ import pandas as pd
 from futures_foundation.features import derive_features
 from .base import get_labeler, XGBStrategyLabeler
 from . import labeler as _v2          # noqa: F401 — registers v2_triple_barrier
-from .walkforward import walk_forward_windows, optuna_holdout
+from pipelines.common.walkforward import walk_forward_windows, optuna_holdout
 from .tuner import tune, _fit_xgb, _signals_from_proba, CONF_THRESHOLD
 from .backtest import run_backtest
-from .objective import PERIODS_PER_YEAR
+from pipelines.common.objective import PERIODS_PER_YEAR
 
 _TF = {'5m': ('5min', 14, 5), '3m': ('3min', 20, 3)}   # file, atr_period, bar_min
 _DATA = os.path.join(os.path.dirname(__file__), '..', '..', 'data')
