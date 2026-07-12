@@ -76,6 +76,8 @@ def _episodes(strategy, df, ctx, mask, run_state):
             ctx[bi:], o, h, l, c, entry_bar=bi, direction=int(e["direction"]),
             sl_distance=float(e["sl_distance"]), tp_rr=float(e["tp_rr"]),
             entry_filter=strategy.entry_filter, max_hold=strategy.max_hold,
+            max_size=strategy.max_size, trail_atr_k=strategy.trail_atr_k,
+            activate_r=strategy.activate_r, friction_r=strategy.friction_r,
             strategy=strategy, run_state=run_state)))
     return out
 
@@ -94,8 +96,8 @@ def _rollout(strategy, episodes, policy, rng, shuffle, run_state):
         obs = env.reset(); done = False; r = 0.0; info = {}
         while not done:
             obs, r, done, _, info = env.step(policy(obs))
-        reason = next((k for k in ("untradable", "veto", "sl", "exit",
-                                   "timeout") if info.get(k)), "other")
+        reason = next((k for k in ("untradable", "veto", "trailed", "sl",
+                                   "exit", "timeout") if info.get(k)), "other")
         if shuffle:                              # break entry↔outcome link
             r = float(rng.standard_normal()) * 0.0  # shuffled = no signal
         try:
@@ -108,6 +110,7 @@ def _rollout(strategy, episodes, policy, rng, shuffle, run_state):
         rich.append({"dt": dt, "r": r,
                      "hold": int(getattr(env, "bars_held", 0)),
                      "reason": reason,
+                     "size": int(info.get("size", 0)),   # fill quantity
                      "took": reason not in ("veto", "untradable")})
     return dated, terminated, rich
 

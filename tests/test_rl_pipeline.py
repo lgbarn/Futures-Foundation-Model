@@ -50,6 +50,7 @@ def test_default_knobs_and_entry_filter_toggle():
     s = _SyntheticStrategy()
     assert s.entry_filter is True            # default: PPO learns chop-veto
     assert s.trail_atr_k == 2.0 and s.activate_r == 1.0 and s.max_hold == 130
+    assert s.max_size == 10 and s.friction_r == 0.0
     assert s.config_dict() == {}
 
     class _NoFilter(_SyntheticStrategy):
@@ -500,7 +501,8 @@ def test_on_fold_complete_callback_and_override_receive_rich_info():
     assert all(not i.get("shuffle") for i in seen_cb)   # real folds only
     if info["trades"]:
         t = info["trades"][0]
-        assert {"dt", "r", "hold", "reason", "took"} <= set(t)
+        assert {"dt", "r", "hold", "reason", "size", "took"} <= set(t)
+        assert t["size"] >= 1 if t["took"] else t["size"] == 0
 
 
 def test_on_fold_complete_default_is_silent_noop():
@@ -510,6 +512,27 @@ def test_on_fold_complete_default_is_silent_noop():
                           RLConfig(seeds=(0,), shuffle_control=False),
                           trainer=_StubTrainer(_take_then_exit))
     assert set(res) == {"verdict", "multiseed", "per_seed"}
+
+
+def test_episodes_pass_strategy_exit_and_size_knobs_to_env():
+    """The driver hands every strategy knob to the env — trail-and-ride
+    exits and take-at-size are strategy-tunable, not hardcoded."""
+    from futures_foundation.rl.pipeline import _episodes
+
+    class _Knobbed(_WFStrategy):
+        name = "knobbed"
+        trail_atr_k = 1.25
+        activate_r = 0.5
+        max_size = 4
+        friction_r = 0.03
+
+    df, ctx = _wf_data()["ES"]
+    eps = _episodes(_Knobbed(), df, ctx, np.ones(len(df), bool), {"cum_r": []})
+    assert eps
+    env = eps[0][1]
+    assert env.trail_atr_k == 1.25 and env.activate_r == 0.5
+    assert env.max_size == 4 and env.action_dim == 5
+    assert env.friction_r == 0.03
 
 
 def test_episode_sampling_env_is_gymnasium_env():
@@ -527,6 +550,7 @@ def test_episode_sampling_env_is_gymnasium_env():
     assert eps, "need episodes for the test"
     env = _EpisodeSamplingEnv(eps[:50], seed=0)
     assert isinstance(env, gym.Env)                  # the SB3 requirement
+    assert env.action_space.n == eps[0][1].action_dim  # veto + sizes
     obs, info = env.reset(seed=0)
     assert obs.shape == (eps[0][1].obs_dim,) and isinstance(info, dict)
     o, r, term, trunc, i = env.step(env.action_space.sample())
@@ -550,4 +574,4 @@ def test_ppo_smoke_trains_on_synthetic_strategy():
     assert eps, "need episodes for the smoke run"
     trainer = make_ppo_trainer(total_timesteps=64, n_steps=32, batch_size=32)
     policy = trainer.train(eps[:20], seed=0)
-    assert policy(eps[0][1].reset()) in (0, 1)    # trained policy acts
+    assert policy(eps[0][1].reset()) in range(eps[0][1].action_dim)  # acts

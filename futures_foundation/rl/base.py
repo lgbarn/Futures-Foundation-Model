@@ -39,12 +39,24 @@ class RLStrategy(ABC):
     #: sees the strategy's own decision state (e.g. account / MLL buffer).
     extra_obs_dim: int = 0
 
-    # ── realized-R exit knobs (reuse futures_foundation.primitives
-    #    realized_r_trailing — one exit impl across the codebase; this is the
-    #    REWARD basis, not a hard exit: PPO learns the actual exit) ──
+    # ── trail-and-ride exit knobs (same semantics as
+    #    futures_foundation.primitives.realized_r_trailing — one exit impl
+    #    across the codebase). The env RUNS this trail mechanically: initial
+    #    1x ATR stop (sl_distance is the ATR unit); once unrealized gain
+    #    reaches activate_r the stop arms and ratchets with a trail_atr_k*ATR
+    #    band, never widening. No fixed take-profit — PPO only adds the
+    #    flatten-early exit on top. ──
     trail_atr_k: float = 2.0
-    activate_r: float = 1.0
+    activate_r: float = 1.0     # Optuna-searched 0.5R-1.0R plug-in side
     max_hold: int = 130
+
+    #: PRE_ENTRY action = veto or take at 1..max_size contracts; the size
+    #: scales fill quantities and reward magnitude.
+    max_size: int = 10
+
+    #: round-trip cost per contract in R units charged on every fill-out
+    #: (0.0 = frictionless).
+    friction_r: float = 0.0
 
     def config_dict(self) -> dict:
         """JSON-serialisable params that affect entry/label output. Used for
@@ -126,8 +138,10 @@ class RLStrategy(ABC):
                                entry-after-signal centrally)
             direction    int   +1 long / -1 short
             sl_distance  float  stop distance in price units (> 0)
-            tp_rr        float  take-profit as a multiple of sl_distance
-                                (>= 1.0; the pipeline enforces TP >= SL)
+            tp_rr        float  legacy detector-schema column (>= 1.0). The
+                                env has NO fixed take-profit — exits are
+                                trail-and-ride; the column is retained for
+                                schema/causality-harness compatibility only.
 
         Causality contract (MANDATORY): every value on row `bar_idx` must be
         computable from bars <= bar_idx. The pipeline runs a causal-parity

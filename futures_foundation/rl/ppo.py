@@ -42,7 +42,8 @@ def _EpisodeSamplingEnv(episodes, seed):
             self.run_state = getattr(e0, "run_state", {"cum_r": []})
             self.observation_space = gym.spaces.Box(
                 -np.inf, np.inf, (obs_dim,), np.float32)
-            self.action_space = gym.spaces.Discrete(2)
+            self.action_space = gym.spaces.Discrete(
+                e0.action_dim if e0 else 2)
 
         def reset(self, *, seed=None, options=None):
             super().reset(seed=seed)

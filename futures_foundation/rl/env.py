@@ -6,16 +6,24 @@ SB3 adapter wraps it later). No strategy IP — the env is fed pre-computed
 entries + the FFM context-head sequence; it does not detect anything.
 
 Decision structure (the converged design):
-  • if entry_filter: PRE_ENTRY action ∈ {veto, take}. Veto ends the
-    episode with reward −veto_cost (ASYMMETRIC take-bias: a veto must pay
-    for itself — this closes the "skip everything" collapse basin).
-  • IN_TRADE action ∈ {hold, exit}. Exit closes at the current bar.
-  • Hard risk stop (SL) is always mechanical (R = −1). Time stop at
-    max_hold. PPO learns the *exit*, not the risk.
+  • if entry_filter: PRE_ENTRY action ∈ {veto, take@size 1..max_size}.
+    Veto (action 0) ends the episode with reward −veto_cost (ASYMMETRIC
+    take-bias: a veto must pay for itself — this closes the "skip
+    everything" collapse basin). Action k ∈ 1..max_size enters with k
+    contracts; the size flows to fill infos and reward magnitude.
+  • IN_TRADE action: 0 = hold, ≥1 = flatten early at the next bar's close
+    (friction applied).
+  • Exits are trail-and-ride, run mechanically by the env: initial 1x ATR
+    stop (sl_distance IS the ATR unit, R = −1); once unrealized gain
+    reaches activate_r the stop arms and trails the favorable extreme with
+    a trail_atr_k*ATR band, ratcheting only — it NEVER widens. There is NO
+    fixed take-profit (tp_rr is accepted for detector-schema compat only).
+    Time stop at max_hold. PPO learns entry size + flatten-early, not the
+    risk.
 Observation = context-head vector ⊕ position-state
-  [in_trade, bars_held/max_hold, unrealized_R, room_to_sl_R].
-Reward is terminal (sparse, one per trade): realized R under the agent's
-chosen exit (long: (exit−entry)/sl ; short: (entry−exit)/sl).
+  [in_trade, bars_held/max_hold, unrealized_R, room_to_live_stop_R].
+Reward is terminal (sparse, one per trade): (realized R − friction_r) ×
+size under the agent's exit (long: (exit−entry)/sl ; short: (entry−exit)/sl).
 """
 import numpy as np
 
