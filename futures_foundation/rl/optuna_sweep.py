@@ -108,7 +108,10 @@ def make_objective(window_evaluator, base_seed: int = 0, max_days: int = 30):
     score is reported after every window for the MedianPruner; the pooled
     summary + seed are logged as user attrs on every trial (pruned ones
     included), so the ranked table and the winner are re-derivable from
-    the study storage alone."""
+    the study storage alone. The final value re-applies the blow floor at
+    trial level (any busted window caps the trial below BLOWN_SCORE), so
+    the every-blowup-ranks-last guarantee holds regardless of how many
+    clean windows would otherwise dilute the mean."""
     import optuna
 
     def objective(trial):
@@ -126,7 +129,10 @@ def make_objective(window_evaluator, base_seed: int = 0, max_days: int = 30):
         if not scores:
             raise RuntimeError("no walk-forward window produced attempts — "
                                "widen the data slice")
-        return float(np.mean(scores))
+        merged = _merge_summaries(summaries)
+        if merged["busted"] > 0:      # trial-level blow floor: a bust cannot
+            return BLOWN_SCORE - float(merged["busted"])  # be mean-diluted
+        return float(np.mean(scores))                     # by clean windows
 
     return objective
 
@@ -207,7 +213,8 @@ def _window_months(datas: dict, train_months: int, test_months: int):
     over the union of months across all symbols (walkforward.py contract,
     lifted to multi-symbol)."""
     months = sorted({m for df, _ in datas.values()
-                     for m in (df.index.tz_localize(None)
+                     for m in ((df.index.tz_localize(None)
+                                if df.index.tz is not None else df.index)
                                .to_period("M").unique())})
     s = 0
     while s + train_months + test_months <= len(months):

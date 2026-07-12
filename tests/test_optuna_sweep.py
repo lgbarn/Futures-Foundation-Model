@@ -67,6 +67,21 @@ def test_days_term_is_capped_at_max_days():
     assert over > none
 
 
+def test_one_busted_window_is_not_mean_diluted_by_clean_windows():
+    # trial 0: one bust among many perfect windows; trial 1: all-clean but
+    # nothing ever passed. The blow floor re-applies at TRIAL level, so
+    # the busted trial still ranks below the worst zero-blow trial.
+    diluted = [_summary(pass_rate=1.0, days=1.0)] * 200 + [_summary(busted=1)]
+    clean = [_summary(pass_rate=0.0, days=None)] * 3
+    calls = []
+    study = run_sweep(_scripted_evaluator([diluted, clean], calls),
+                      n_trials=2, n_startup_trials=5)   # no pruning
+    blown_trial, clean_trial = study.trials
+    assert blown_trial.value <= BLOWN_SCORE - 1
+    assert blown_trial.value < clean_trial.value
+    assert ranked_rows(study)[0]["trial"] == clean_trial.number
+
+
 # ──────────────────────────────── AC3: median pruning kills early failures
 def _scripted_evaluator(script, calls):
     """window_evaluator whose per-window summaries come from `script`, one
@@ -101,6 +116,32 @@ def test_pruner_kills_trial_failing_its_early_windows():
                               "dll_penalty", "mll_penalty"}
     assert t3.user_attrs["seed"] == 3
     assert t3.user_attrs["summary"]["busted"] == 2
+    # ranked_rows ranks the pruned (value-less) trial by its last reported
+    # running-mean score, at the bottom of the table
+    rows = ranked_rows(study)
+    assert rows[-1]["trial"] == 3 and rows[-1]["state"] == "PRUNED"
+    assert rows[-1]["score"] == pytest.approx(t3.intermediate_values[0])
+
+
+def test_evaluator_yielding_no_windows_fails_loud():
+    def empty(params, seed):
+        return iter(())
+    with pytest.raises(RuntimeError, match="no walk-forward window"):
+        run_sweep(empty, n_trials=1)
+
+
+def test_pooled_summary_across_heterogeneous_windows():
+    script = [[_summary(pass_rate=1.0, days=4.0, attempts=2),
+               _summary(pass_rate=0.5, days=10.0, attempts=4),
+               _summary(pass_rate=0.0, days=None, attempts=2)]]
+    study = run_sweep(_scripted_evaluator(script, []), n_trials=1)
+    s = study.trials[0].user_attrs["summary"]
+    assert s["windows"] == 3
+    assert s["attempts"] == 8
+    assert s["passed"] == 4                    # 2 + 2 + 0
+    assert s["pass_rate"] == pytest.approx(0.5)
+    assert s["busted"] == 0
+    assert s["median_days_to_pass"] == pytest.approx(7.0)   # median(4, 10)
 
 
 def test_healthy_trials_run_all_windows():
