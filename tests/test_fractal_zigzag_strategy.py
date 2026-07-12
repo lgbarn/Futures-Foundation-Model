@@ -15,8 +15,11 @@ import pandas as pd
 import pytest
 
 from futures_foundation.pipeline._primitives import compute_atr
+from futures_foundation.rl.base import get_strategy
 from futures_foundation.rl.causal import assert_causal
-from futures_foundation.rl.fractal_zigzag import FractalZigzagStrategy
+from futures_foundation.rl.fractal_zigzag import (
+    OBS_FEATURE_NAMES, SYMBOLS, FractalZigzagStrategy, compute_obs_features,
+    load_3min_parquet)
 
 
 def _df(n=3000, seed=11):
@@ -70,19 +73,25 @@ def test_every_entry_has_1x_atr_stop():
         assert np.isclose(e["sl_distance"], 1.0 * atr[bi])
         assert np.isclose(e["stop_price"],
                           e["entry_price"] - e["direction"] * e["sl_distance"])
-        assert e["tp_rr"] >= 1.0                    # pipeline contract
+        assert e["tp_rr"] == strat.tp_rr and e["tp_rr"] >= 1.0  # wired knob
+
+
+def test_registered_in_rl_registry():
+    """The pipeline looks the plug-in up by name — pin the registered key."""
+    assert isinstance(get_strategy("fractal_zigzag"), FractalZigzagStrategy)
 
 
 # --------------------------------------------- AC 4: causal obs features
 def test_obs_features_truncation_invariant():
     """Row i of the observation-feature matrix is byte-identical whether the
     future exists or not — the same truncation proof applied to the vectors."""
-    from futures_foundation.rl.fractal_zigzag import (
-        OBS_FEATURE_NAMES, compute_obs_features)
     df = _df(seed=3)
     F = compute_obs_features(df)
     assert F.shape == (len(df), len(OBS_FEATURE_NAMES))
     assert np.isfinite(F).all()
+    # non-degenerate: past ATR warm-up every feature column carries signal
+    # (an all-zeros matrix is trivially causal — that must not pass AC 4)
+    assert F[25:].std(axis=0).min() > 0
     for t in (300, 1100, 2400):
         Fp = compute_obs_features(df.iloc[:t + 1])
         np.testing.assert_array_equal(Fp, F[:t + 1])
@@ -99,7 +108,6 @@ def test_six_symbols_load_and_produce_plausible_counts():
     """Every symbol loads from Parquet, spans 2021-04 .. 2026-06, and yields
     an entry rate in a plausible band for k=2 / 1.25-ATR-leg pivots on 3-min
     bars (neither degenerate silence nor per-bar noise)."""
-    from futures_foundation.rl.fractal_zigzag import SYMBOLS, load_3min_parquet
     strat = FractalZigzagStrategy()
     assert set(SYMBOLS) == {"NQ", "ES", "RTY", "YM", "GC", "SI"}
     for sym in SYMBOLS:
