@@ -19,7 +19,7 @@ from futures_foundation.rl.combine_tracer import evaluate_combine_attempts
 from futures_foundation.rl.env import SingleTradeEnv
 from futures_foundation.rl.topstep_zigzag import (
     FRESH_FEATURES, TopstepZigzagStrategy, account_features)
-from futures_foundation.topstep import simulate_combine
+from futures_foundation.topstep import Fill, simulate_combine
 
 CTX_DIM = 2
 
@@ -161,6 +161,37 @@ def test_evaluation_bust_fails_the_attempt_and_starts_a_fresh_one():
     assert simulate_combine(bust["fills"]).state == "busted-MLL"
     assert attempts[1]["note"] == "data exhausted"
     assert simulate_combine(attempts[1]["fills"]).state == "timeout"
+
+
+def test_evaluation_max_days_cap_times_out_the_attempt():
+    # max_days=1: the day-2 trade first closes the day-1 attempt as a
+    # timeout (note "max-days cap", state from the real seam), then opens
+    # a fresh attempt that ends with the data.
+    strat = TopstepZigzagStrategy()
+    rs = {"cum_r": []}
+    episodes = [(_ts(1), _env(strat, rs)),
+                (_ts(2), _env(strat, rs, offset=10))]
+    attempts = evaluate_combine_attempts(strat, _policy(10), episodes,
+                                         max_days=1)
+    assert [a["state"] for a in attempts] == ["timeout", "timeout"]
+    assert [a["note"] for a in attempts] == ["max-days cap", "data exhausted"]
+    assert [a["trades"] for a in attempts] == [1, 1]
+    assert [a["days"] for a in attempts] == [1, 1]
+
+
+def test_account_features_anchor_ratchets_at_eod():
+    # Day 1 nets +$3,000 -> the trailing anchor ratchets to $103,000 at
+    # EOD, locking the MLL floor at $100,000 (min with the start balance).
+    # Day 2 nets -$1,000 -> equity $102,000. Without the EOD ratchet the
+    # floor would still be $97,000 and dist_MLL would clip to 1.0.
+    def nq(day, net):
+        points = (net + 12.80) / 20.0     # NQ $20/pt, $12.80 friction
+        return Fill(day=day, symbol="NQ", qty=1, entry=17_000.0,
+                    exit=17_000.0 + points)
+    feat = account_features([nq(1, 3_000.0), nq(2, -1_000.0)])
+    assert feat[0] == pytest.approx(0.5)      # DLL: (2000-1000)/2000
+    assert feat[1] == pytest.approx(2 / 3)    # MLL: (102000-100000)/3000
+    assert feat[2] == pytest.approx(1 / 3)    # progress: 2000/6000
 
 
 def test_evaluation_vetoed_trades_produce_no_fills():

@@ -49,6 +49,12 @@ def account_features(fills, rules: CombineRules = TOPSTEP_100K) -> np.ndarray:
     keys (the trailing anchor ratchets only at EOD, mirroring the rule the
     simulator enforces). Distances are the fraction of each buffer still
     unspent, clipped to [0, 1]; progress is clipped to [-1, 1].
+
+    ponytail: the anchor/MLL-floor arithmetic below re-encodes two rule
+    facts the simulator owns, because CombineResult exposes only
+    state/days/equity. Terminal decisions still come from simulate_combine
+    only; if Topstep mechanics ever change, the upgrade path is exposing
+    the running anchor on CombineResult and deleting this derivation.
     """
     if not len(fills):
         return FRESH_FEATURES.copy()
@@ -110,7 +116,9 @@ class TopstepZigzagStrategy(FractalZigzagStrategy):
 
     def _synthetic_fill(self, day, dollars: float) -> Fill:
         """One-contract fill on self.symbol whose NET P&L through the
-        simulator (which charges its own friction) is exactly `dollars`."""
+        simulator (which charges its own friction) is `dollars` to the
+        cent — the account books dollars-and-cents, so sub-cent amounts
+        round away inside the simulator."""
         tick_size, tick_value = SYMBOL_SPECS[self.symbol]
         friction = 2.0 * (self.rules.slippage_ticks * tick_value
                           + self.rules.commission_per_side)
