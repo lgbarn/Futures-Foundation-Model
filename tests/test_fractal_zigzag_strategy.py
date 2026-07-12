@@ -10,6 +10,7 @@ One red→green seam per acceptance criterion:
 import numpy as np
 import pandas as pd
 
+from futures_foundation.pipeline._primitives import compute_atr
 from futures_foundation.rl.causal import assert_causal
 from futures_foundation.rl.fractal_zigzag import FractalZigzagStrategy
 
@@ -45,3 +46,25 @@ def test_entries_truncation_invariant():
         pref = detector(df.iloc[:t + 1]).reset_index(drop=True)
         want = full[full["bar_idx"] <= t].reset_index(drop=True)
         pd.testing.assert_frame_equal(pref, want)
+
+
+# ------------------------------------------------- AC 2: 1x ATR initial stop
+def test_every_entry_has_1x_atr_stop():
+    """sl_distance on every candidate == 1.0 * Wilder ATR at the signal bar
+    (attached at detection time), and stop_price sits exactly one stop
+    against the trade from the entry reference price."""
+    df = _df(seed=7)
+    strat = FractalZigzagStrategy()
+    ev = strat.detect_entries(df, df, "ES")
+    assert len(ev) > 10
+    atr = compute_atr(df["high"].values, df["low"].values,
+                      df["close"].values, strat.atr_period)
+    for _, e in ev.iterrows():
+        bi = int(e["bar_idx"])
+        assert e["direction"] in (1, -1)
+        assert np.isfinite(e["sl_distance"]) and e["sl_distance"] > 0
+        assert np.isclose(e["sl_distance"], 1.0 * atr[bi])
+        assert np.isclose(e["stop_price"],
+                          e["entry_price"] - e["direction"] * e["sl_distance"])
+        assert e["tp_rr"] >= 1.0                    # pipeline contract
+

@@ -19,8 +19,8 @@ from futures_foundation.primitives.detection import detect_fractal_zigzag_pivots
 
 from .base import RLStrategy, register
 
-ENTRY_COLUMNS = ["bar_idx", "direction", "entry_price",
-                 "sl_distance", "tp_rr", "datetime"]
+ENTRY_COLUMNS = ["bar_idx", "direction", "entry_price", "sl_distance",
+                 "stop_price", "tp_rr", "datetime"]
 
 
 @register("fractal_zigzag")
@@ -58,10 +58,13 @@ class FractalZigzagStrategy(RLStrategy):
             a = atr[bi]
             if not (np.isfinite(a) and a > 0):
                 continue                      # ATR warm-up: no stop, no entry
+            d = p["direction"]
+            sl = self.stop_atr * a
             rows.append({"bar_idx": bi,
-                         "direction": p["direction"],
+                         "direction": d,
                          "entry_price": c[bi],
-                         "sl_distance": self.stop_atr * a,
+                         "sl_distance": sl,
+                         "stop_price": c[bi] - d * sl,   # 1x ATR initial stop
                          "tp_rr": self.tp_rr,
                          "datetime": df_raw.index[bi]})
         return pd.DataFrame(rows, columns=ENTRY_COLUMNS)
