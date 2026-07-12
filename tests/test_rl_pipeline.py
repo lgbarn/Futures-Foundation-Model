@@ -228,6 +228,43 @@ def test_env_trail_arms_at_activate_r_and_stop_never_widens():
     assert all(b >= a for a, b in zip(stops, stops[1:]))  # monotone
 
 
+def test_env_runaway_winner_rides_trail_past_fixed_target():
+    """AC: a runaway winner exits on the TRAIL, not at any fixed take-profit —
+    realized R lands far beyond the detector's tp_rr, at trail-exit levels."""
+    n = 40
+    px = 100.0 + np.arange(n) * 1.0               # relentless uptrend
+    px[30:] = px[29] - 5.0                        # ...then a break that
+    #                                               finally tags the trail
+    o = px.copy(); h = px + 0.5; l = px - 0.5; c = px.copy()
+    ctx = np.zeros((n, 3), np.float32)
+    e = SingleTradeEnv(ctx, o, h, l, c, entry_bar=5, direction=1,
+                       sl_distance=2.0, tp_rr=2.0, entry_filter=True,
+                       max_hold=100, trail_atr_k=1.5, activate_r=1.0)
+    e.reset()
+    e.step(1)                                     # take, size 1
+    term, r, info = False, 0.0, {}
+    while not term:
+        _, r, term, _, info = e.step(0)           # ride — never flatten
+    assert info.get("sl") and info.get("trailed")  # exited on the trail
+    assert not info.get("timeout")
+    assert r > 2.0 * 2                            # way past tp_rr=2 (no TP)
+
+
+def test_env_immediate_loser_exits_at_1x_atr_for_minus_1R_times_size():
+    """AC: a synthetic immediate loser hits the untouched 1x ATR stop for
+    exactly -1R x size."""
+    ctx, o, h, l, c = _arrs(40, trend=1.0)
+    l2 = l.copy(); l2[7] = 90.0                   # crash straight through stop
+    e = SingleTradeEnv(ctx, o, h, l2, c, entry_bar=5, direction=1,
+                       sl_distance=1.0, entry_filter=True)
+    e.reset()
+    _, _, _, _, info = e.step(4)                  # take at size 4
+    assert info["size"] == 4
+    obs, r, term, _, info = e.step(0)             # hold into the crash bar
+    assert term and info.get("sl") and not info.get("trailed")
+    assert r == pytest.approx(-4.0, abs=1e-6)     # -1R x 4 contracts
+
+
 # ── causal-parity harness ────────────────────────────────────────────────────
 from futures_foundation.rl.causal import check_causal, assert_causal
 
