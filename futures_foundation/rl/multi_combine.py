@@ -137,3 +137,22 @@ def evaluate_account_attempts(policy, episodes, rules: CombineRules =
     taken = sum(a["trades"] for a in attempts)
     return {"attempts": attempts, "signals": len(eps),
             "skipped_while_open": skipped, "taken": taken}
+
+
+def summarize_attempts(attempts) -> dict:
+    """Pass-rate / days / bust-breakdown numbers over rolling attempts —
+    the ONE summary seam the policy and both baselines report through."""
+    n = len(attempts)
+    passed = sum(a["state"] == PASSED for a in attempts)
+    bust_breakdown = {}
+    for a in attempts:
+        if a["state"].startswith("busted"):
+            bust_breakdown[a["state"]] = bust_breakdown.get(a["state"], 0) + 1
+    busted = sum(bust_breakdown.values())
+    pass_days = sorted(a["days"] for a in attempts if a["state"] == PASSED)
+    return {"attempts": n, "passed": passed,
+            "pass_rate": (passed / n) if n else 0.0,
+            "busted": busted, "bust_breakdown": bust_breakdown,
+            "timeout": n - passed - busted,
+            "median_days_to_pass": (float(np.median(pass_days))
+                                    if pass_days else None)}

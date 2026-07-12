@@ -20,7 +20,8 @@ import pytest
 from futures_foundation.rl.base import get_strategy
 from futures_foundation.rl.env import SingleTradeEnv
 from futures_foundation.rl.multi_combine import (
-    SixSymbolTopstepStrategy, SymbolEpisode, evaluate_account_attempts)
+    SixSymbolTopstepStrategy, SymbolEpisode, evaluate_account_attempts,
+    summarize_attempts)
 from futures_foundation.rl.topstep_zigzag import FRESH_FEATURES
 from futures_foundation.topstep import simulate_combine
 
@@ -115,3 +116,74 @@ def test_registered_in_rl_registry():
     strat = get_strategy("topstep_six_symbol", symbol="SI")
     assert isinstance(strat, SixSymbolTopstepStrategy)
     assert strat.symbol == "SI"
+
+
+# ------------------- AC2: rolling attempts, fresh accounts, count reported
+def test_bust_starts_a_fresh_100k_attempt():
+    # Day 1: NQ 10 lots stopped 16 pts against -> -$3,328 <= the locked
+    # $97,000 MLL floor -> attempt 1 busts. Day 2: +20pt NQ win at 10 lots
+    # opens attempt 2 from a FRESH $100K account -> $103,872.
+    rs = {"cum_r": []}
+    nq = SixSymbolTopstepStrategy(symbol="NQ")
+    episodes = [
+        _episode(nq, rs, "2024-04-01 14:00", signal_bar=0,
+                 sl=16.0, stop_low=80.0),          # stopped out, bust
+        _episode(nq, rs, "2024-04-02 14:00", signal_bar=0),  # +20pt win
+    ]
+    result = evaluate_account_attempts(_policy(10), episodes)
+    attempts = result["attempts"]
+    assert [a["state"] for a in attempts] == ["busted-MLL", "timeout"]
+    assert attempts[0]["equity"] == pytest.approx(100_000.0 - 3_328.0)
+    # fresh $100K base — attempt 1's loss does NOT carry over
+    assert attempts[1]["equity"] == pytest.approx(100_000.0 + 3_872.0)
+    assert attempts[1]["note"] == "data exhausted"
+    # attempts are independent: each terminal state is re-derivable from
+    # its OWN fills through the pure seam
+    for a in attempts:
+        assert simulate_combine(a["fills"]).state == a["state"]
+
+
+def test_max_days_cap_times_out_the_attempt():
+    rs = {"cum_r": []}
+    nq = SixSymbolTopstepStrategy(symbol="NQ")
+    episodes = [_episode(nq, rs, "2024-04-01 14:00", signal_bar=0),
+                _episode(nq, rs, "2024-04-02 14:00", signal_bar=0)]
+    result = evaluate_account_attempts(_policy(10), episodes, max_days=1)
+    attempts = result["attempts"]
+    assert [a["state"] for a in attempts] == ["timeout", "timeout"]
+    assert [a["note"] for a in attempts] == ["max-days cap", "data exhausted"]
+    assert [a["days"] for a in attempts] == [1, 1]
+
+
+def test_summary_reports_the_attempt_count():
+    rs = {"cum_r": []}
+    nq = SixSymbolTopstepStrategy(symbol="NQ")
+    episodes = [
+        _episode(nq, rs, "2024-04-01 14:00", signal_bar=0,
+                 sl=16.0, stop_low=80.0),          # busted-MLL
+        _episode(nq, rs, "2024-04-02 14:00", signal_bar=0),  # timeout
+    ]
+    result = evaluate_account_attempts(_policy(10), episodes)
+    s = summarize_attempts(result["attempts"])
+    assert s["attempts"] == 2
+    assert s["passed"] == 0 and s["pass_rate"] == 0.0
+    assert s["busted"] == 1 and s["bust_breakdown"] == {"busted-MLL": 1}
+    assert s["timeout"] == 1
+    assert s["median_days_to_pass"] is None
+
+
+def test_summary_pass_rate_and_median_days():
+    # Two +20pt NQ wins at 10 contracts on two days: $3,872 each, total
+    # $7,744 >= $6,000 with best day exactly 50% -> passed in 2 days.
+    rs = {"cum_r": []}
+    nq = SixSymbolTopstepStrategy(symbol="NQ")
+    episodes = [_episode(nq, rs, "2024-04-01 14:00", signal_bar=0),
+                _episode(nq, rs, "2024-04-02 14:00", signal_bar=0)]
+    result = evaluate_account_attempts(_policy(10), episodes)
+    s = summarize_attempts(result["attempts"])
+    assert s["attempts"] == 1
+    assert s["passed"] == 1 and s["pass_rate"] == 1.0
+    assert s["median_days_to_pass"] == 2.0
+    assert summarize_attempts([]) == {
+        "attempts": 0, "passed": 0, "pass_rate": 0.0, "busted": 0,
+        "bust_breakdown": {}, "timeout": 0, "median_days_to_pass": None}
