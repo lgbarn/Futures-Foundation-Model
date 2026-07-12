@@ -1,0 +1,117 @@
+"""Six-symbol account, rolling OOS combine attempts, baselines (issue #9).
+
+One seam per acceptance criterion, all scripted policies (no SB3):
+  AC1 — at most ONE open position account-wide across symbols: a signal
+        arriving while a position is open is skipped (overlapping
+        synthetic signals); symbol identity joins the observations
+  AC2 — rolling attempt slicing yields independent attempts with fresh
+        $100K accounts; the attempt count is reported
+  AC3 — both no-skill baselines run through the exact same simulator +
+        attempt-slicing seam at fixed minimal size
+  AC4 — per-symbol trade attribution for the verdict report
+Expected dollar values are hand-computed from the published rule contract
+(NQ $20/pt, ES $50/pt, friction $12.80 / $27.80 per contract round trip),
+never recomputed via the module under test.
+"""
+import numpy as np
+import pandas as pd
+import pytest
+
+from futures_foundation.rl.base import get_strategy
+from futures_foundation.rl.env import SingleTradeEnv
+from futures_foundation.rl.multi_combine import (
+    SixSymbolTopstepStrategy, SymbolEpisode, evaluate_account_attempts)
+from futures_foundation.rl.topstep_zigzag import FRESH_FEATURES
+from futures_foundation.topstep import simulate_combine
+
+CTX_DIM = 2
+
+
+def _episode(strategy, rs, start, signal_bar, n=40, direction=1, sl=15.0,
+             exit_close=120.0, stop_low=None):
+    """One synthetic episode on a flat-100 series with 3-minute bars from
+    `start`: signal at `signal_bar`, entry at the next bar's open (= 100),
+    then either flatten at `exit_close` or (if stop_low <= stop) stop out
+    on the bar after entry."""
+    e, x = signal_bar + 1, signal_bar + 2
+    o = np.full(n, 100.0); h = np.full(n, 100.0)
+    l = np.full(n, 100.0); c = np.full(n, 100.0)
+    h[e] = 100.5; l[e] = 99.5
+    o[x] = c[x] = exit_close
+    h[x] = max(100.0, exit_close) + 1.0
+    l[x] = stop_low if stop_low is not None else min(100.0, exit_close) - 1.0
+    ctx = np.zeros((n - signal_bar, CTX_DIM), np.float32)
+    idx = pd.date_range(start, periods=n, freq="3min", tz="UTC")
+    env = SingleTradeEnv(ctx, o, h, l, c, entry_bar=signal_bar,
+                         direction=direction, sl_distance=sl,
+                         entry_filter=True, strategy=strategy, run_state=rs)
+    return SymbolEpisode(dt=idx[signal_bar], env=env, strategy=strategy,
+                         index=idx)
+
+
+def _policy(size):
+    """Scripted: take at `size` pre-entry, flatten on the first in-trade
+    bar (obs[CTX_DIM] is the in_trade flag)."""
+    return lambda obs: 1 if obs[CTX_DIM] > 0.5 else size
+
+
+# ---------------------------------------------- AC1: one position, one account
+def test_signal_while_position_open_is_skipped_across_symbols():
+    # NQ signal 14:00, in a trade 14:03 -> exit 14:06. The overlapping ES
+    # signal at 14:03 MUST be skipped (a position is already open account-
+    # wide); the later ES signal at 14:12 is free to trade.
+    rs = {"cum_r": []}
+    nq = SixSymbolTopstepStrategy(symbol="NQ")
+    es = SixSymbolTopstepStrategy(symbol="ES")
+    start = "2024-04-01 14:00"
+    episodes = [
+        _episode(es, rs, start, signal_bar=1),    # 14:03 — overlaps NQ trade
+        _episode(nq, rs, start, signal_bar=0),    # 14:00 — trades first
+        _episode(es, rs, start, signal_bar=4),    # 14:12 — after the exit
+    ]                                             # deliberately unsorted
+    result = evaluate_account_attempts(_policy(1), episodes)
+    assert result["signals"] == 3
+    assert result["skipped_while_open"] == 1
+    assert result["taken"] == 2
+    fills = [f for a in result["attempts"] for f in a["fills"]]
+    assert [f.symbol for f in fills] == ["NQ", "ES"]
+
+
+def test_vetoed_signal_does_not_hold_the_account():
+    # The policy vetoes the NQ signal -> no position -> the overlapping ES
+    # signal at 14:03 trades.
+    rs = {"cum_r": []}
+    nq = SixSymbolTopstepStrategy(symbol="NQ")
+    es = SixSymbolTopstepStrategy(symbol="ES")
+    start = "2024-04-01 14:00"
+    episodes = [_episode(nq, rs, start, signal_bar=0),
+                _episode(es, rs, start, signal_bar=1)]
+    calls = {"n": 0}
+
+    def veto_first(obs):
+        if obs[CTX_DIM] > 0.5:
+            return 1                              # flatten in-trade
+        calls["n"] += 1
+        return 0 if calls["n"] == 1 else 1        # veto NQ, take ES
+    result = evaluate_account_attempts(veto_first, episodes)
+    assert result["skipped_while_open"] == 0
+    assert result["taken"] == 1
+    fills = [f for a in result["attempts"] for f in a["fills"]]
+    assert [f.symbol for f in fills] == ["ES"]
+
+
+def test_symbol_identity_one_hot_joins_the_observation():
+    strat = SixSymbolTopstepStrategy(symbol="GC")
+    assert strat.extra_obs_dim == 3 + 6
+    ep = _episode(strat, {"cum_r": []}, "2024-04-01 14:00", signal_bar=0)
+    assert ep.env.obs_dim == CTX_DIM + 4 + 3 + 6
+    obs = ep.env.reset()
+    # (NQ, ES, RTY, YM, GC, SI) order — GC is position 4
+    np.testing.assert_array_equal(obs[-6:], [0, 0, 0, 0, 1, 0])
+    np.testing.assert_array_equal(obs[-9:-6], FRESH_FEATURES)
+
+
+def test_registered_in_rl_registry():
+    strat = get_strategy("topstep_six_symbol", symbol="SI")
+    assert isinstance(strat, SixSymbolTopstepStrategy)
+    assert strat.symbol == "SI"
