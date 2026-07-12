@@ -23,6 +23,19 @@ from .base import RLStrategy, register
 ENTRY_COLUMNS = ["bar_idx", "direction", "entry_price", "sl_distance",
                  "stop_price", "tp_rr", "datetime"]
 
+#: the six 3-min Parquet instruments (data/<SYM>_3min.parquet)
+SYMBOLS = ("NQ", "ES", "RTY", "YM", "GC", "SI")
+
+
+def load_3min_parquet(path) -> pd.DataFrame:
+    """Load one <SYM>_3min.parquet (columns datetime/open/high/low/close/
+    volume) into an OHLCV frame indexed by its tz-aware datetime, sorted."""
+    raw = pd.read_parquet(path)
+    ts = pd.DatetimeIndex(pd.to_datetime(raw["datetime"], utc=True),
+                          name="datetime")
+    df = raw.drop(columns=["datetime"]).set_index(ts).sort_index()
+    return df[["open", "high", "low", "close", "volume"]].astype(float)
+
 #: causal pivot-structure features (htf_dir excluded: its ATR floor is a
 #: full-series median — not truncation-invariant, so not obs-safe)
 OBS_FEATURE_NAMES = [n for n in PIVOT_NAMES if n != "htf_dir"]

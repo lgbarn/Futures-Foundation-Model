@@ -7,8 +7,12 @@ One red→green seam per acceptance criterion:
   3. all six 3-min Parquet symbols load and produce plausible entry counts
   4. observation features causal — same truncation proof on the vectors
 """
+import os
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+import pytest
 
 from futures_foundation.pipeline._primitives import compute_atr
 from futures_foundation.rl.causal import assert_causal
@@ -82,4 +86,32 @@ def test_obs_features_truncation_invariant():
     for t in (300, 1100, 2400):
         Fp = compute_obs_features(df.iloc[:t + 1])
         np.testing.assert_array_equal(Fp, F[:t + 1])
+
+
+# --------------------------------- AC 3: six symbols, plausible entry counts
+_DATA_DIR = Path(os.environ.get(
+    "FFM_DATA_DIR", Path(__file__).resolve().parents[1] / "data"))
+
+
+@pytest.mark.skipif(not (_DATA_DIR / "NQ_3min.parquet").exists(),
+                    reason="3-min Parquet data not present (local-only)")
+def test_six_symbols_load_and_produce_plausible_counts():
+    """Every symbol loads from Parquet, spans 2021-04 .. 2026-06, and yields
+    an entry rate in a plausible band for k=2 / 1.25-ATR-leg pivots on 3-min
+    bars (neither degenerate silence nor per-bar noise)."""
+    from futures_foundation.rl.fractal_zigzag import SYMBOLS, load_3min_parquet
+    strat = FractalZigzagStrategy()
+    assert set(SYMBOLS) == {"NQ", "ES", "RTY", "YM", "GC", "SI"}
+    for sym in SYMBOLS:
+        df = load_3min_parquet(_DATA_DIR / f"{sym}_3min.parquet")
+        assert list(df.columns) == ["open", "high", "low", "close", "volume"]
+        assert isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None
+        assert df.index.is_monotonic_increasing
+        assert df.index[0] <= pd.Timestamp("2021-05-01", tz="UTC")
+        assert df.index[-1] >= pd.Timestamp("2026-06-01", tz="UTC")
+        ev = strat.detect_entries(df, df, sym)
+        rate = len(ev) / len(df)
+        assert 1 / 500 < rate < 1 / 5, (sym, len(df), len(ev))
+        assert (ev["sl_distance"] > 0).all()
+        assert ev["bar_idx"].is_monotonic_increasing
 
