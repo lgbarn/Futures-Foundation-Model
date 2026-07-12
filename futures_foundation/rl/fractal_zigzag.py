@@ -15,12 +15,30 @@ import numpy as np
 import pandas as pd
 
 from futures_foundation.pipeline._primitives import compute_atr
+from futures_foundation.pivots import PIVOT_NAMES, pivot_features
 from futures_foundation.primitives.detection import detect_fractal_zigzag_pivots
 
 from .base import RLStrategy, register
 
 ENTRY_COLUMNS = ["bar_idx", "direction", "entry_price", "sl_distance",
                  "stop_price", "tp_rr", "datetime"]
+
+#: causal pivot-structure features (htf_dir excluded: its ATR floor is a
+#: full-series median — not truncation-invariant, so not obs-safe)
+OBS_FEATURE_NAMES = [n for n in PIVOT_NAMES if n != "htf_dir"]
+
+
+def compute_obs_features(df: pd.DataFrame, atr_period: int = 20) -> np.ndarray:
+    """Strictly causal per-bar observation features [T, len(OBS_FEATURE_NAMES)]:
+    row i is computable from bars <= i (rolling pivot structure + ATR-normalised
+    velocity from futures_foundation.pivots). ATR warm-up NaNs -> 0 so the
+    matrix is finite and byte-identical under truncation."""
+    h = df["high"].to_numpy(float)
+    l = df["low"].to_numpy(float)
+    c = df["close"].to_numpy(float)
+    atr = compute_atr(h, l, c, atr_period)
+    F = pivot_features({"h": h, "l": l, "c": c, "atr": atr})
+    return np.nan_to_num(F, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 @register("fractal_zigzag")

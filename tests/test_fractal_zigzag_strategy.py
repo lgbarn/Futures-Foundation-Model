@@ -68,3 +68,18 @@ def test_every_entry_has_1x_atr_stop():
                           e["entry_price"] - e["direction"] * e["sl_distance"])
         assert e["tp_rr"] >= 1.0                    # pipeline contract
 
+
+# --------------------------------------------- AC 4: causal obs features
+def test_obs_features_truncation_invariant():
+    """Row i of the observation-feature matrix is byte-identical whether the
+    future exists or not — the same truncation proof applied to the vectors."""
+    from futures_foundation.rl.fractal_zigzag import (
+        OBS_FEATURE_NAMES, compute_obs_features)
+    df = _df(seed=3)
+    F = compute_obs_features(df)
+    assert F.shape == (len(df), len(OBS_FEATURE_NAMES))
+    assert np.isfinite(F).all()
+    for t in (300, 1100, 2400):
+        Fp = compute_obs_features(df.iloc[:t + 1])
+        np.testing.assert_array_equal(Fp, F[:t + 1])
+
