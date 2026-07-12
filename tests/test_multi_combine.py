@@ -302,3 +302,30 @@ def test_evaluation_attempts_flow_into_attribution():
     # ES: +2pt x 10 -> $1,000 - $278 = $722
     assert attrib["ES"] == {"trades": 1, "net_pnl": pytest.approx(722.0),
                             "busts": 0}
+
+
+# ------------- training seam: the shared account books per-episode symbols
+def test_training_env_books_fills_with_the_episodes_own_symbol():
+    # The episode-sampling training env must shape each terminal reward
+    # through the CURRENT episode's strategy arm, not episode 0's — with
+    # six per-symbol arms sharing one account, an ES trade booked as NQ
+    # would corrupt the training account.
+    pytest.importorskip("gymnasium")
+    from futures_foundation.rl.ppo import _EpisodeSamplingEnv
+    rs = {"cum_r": []}
+    nq = SixSymbolTopstepStrategy(symbol="NQ", dollars_per_r=100.0,
+                                  trades_per_day=100)
+    es = SixSymbolTopstepStrategy(symbol="ES", dollars_per_r=100.0,
+                                  trades_per_day=100)
+    ep_nq = _episode(nq, rs, "2024-04-01 14:00", signal_bar=0)
+    ep_es = _episode(es, rs, "2024-04-01 15:00", signal_bar=0)
+    senv = _EpisodeSamplingEnv([(ep_nq.dt, ep_nq.env),
+                                (ep_es.dt, ep_es.env)], seed=0)
+    senv.reset()
+    senv.cur = ep_es.env                       # force the ES episode
+    senv.cur.reset()
+    _, _, term, _, _ = senv.step(1)            # take at size 1
+    assert not term
+    _, _, term, _, _ = senv.step(1)            # flatten -> terminal
+    assert term
+    assert [f.symbol for f in rs["topstep"]["fills"]] == ["ES"]
