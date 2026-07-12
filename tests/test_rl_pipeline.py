@@ -229,6 +229,35 @@ def test_env_trail_arms_at_activate_r_and_stop_never_widens():
     assert all(b >= a for a, b in zip(stops, stops[1:]))  # monotone
 
 
+def test_env_short_trail_ratchets_down_and_never_widens():
+    """Short-direction mirror: the trail arms off the favorable LOW, ratchets
+    the stop DOWN via min, and never widens on pullback bars."""
+    n = 14
+    o = np.full(n, 100.0); h = o + 0.5; l = o - 0.5; c = o.copy()
+    # entry_bar=5 → short entry at bar 6 open = 100, sl=2 → initial stop 102
+    h[7], l[7], c[7] = 100.5, 99.0, 99.5     # fav_r 0.5 < 1.0 → no arm
+    h[8], l[8], c[8] = 100.0, 98.5, 99.0     # fav_r 0.75 → still no arm
+    h[9], l[9], c[9] = 99.0, 96.0, 96.5      # fav_r 2.0 ≥ 1.0 → arm; trail
+    #                                          = 96 + 1.5*2 = 99
+    h[10], l[10], c[10] = 98.5, 97.0, 98.0   # pullback up: stop must NOT widen
+    h[11], l[11], c[11] = 98.0, 94.0, 95.0   # new low extreme → trail 97
+    ctx = np.zeros((n, 3), np.float32)
+    e = SingleTradeEnv(ctx, o, h, l, c, entry_bar=5, direction=-1,
+                       sl_distance=2.0, entry_filter=False, max_hold=50,
+                       trail_atr_k=1.5, activate_r=1.0)
+    e.reset()
+    stops = []
+    for _ in range(5):                        # bars 7..11, always hold
+        _, r, term, _, info = e.step(0)
+        assert not term
+        stops.append(e.sl_price)
+    assert stops[0] == stops[1] == pytest.approx(102.0)  # pre-arm untouched
+    assert stops[2] == pytest.approx(99.0)               # armed → ratchet down
+    assert stops[3] == pytest.approx(99.0)               # pullback: no widen
+    assert stops[4] == pytest.approx(97.0)               # new extreme → down
+    assert all(b <= a for a, b in zip(stops, stops[1:]))  # monotone
+
+
 def test_env_runaway_winner_rides_trail_past_fixed_target():
     """AC: a runaway winner exits on the TRAIL, not at any fixed take-profit —
     realized R lands far beyond the detector's tp_rr, at trail-exit levels."""
