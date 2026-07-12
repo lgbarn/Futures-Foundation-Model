@@ -22,6 +22,9 @@ setup(
         "foundation": ["torch>=2.0", "chronos-forecasting"],
         "heads": ["xgboost>=2.0", "joblib>=1.3"],
         "regime": ["hmmlearn>=0.3"],   # futures_foundation.regime market-state HMM
+        # futures_foundation.rl default PPO trainer — lazy-imported at train
+        # time only; importing the rl package needs none of these.
+        "rl": ["stable-baselines3>=2.0", "gymnasium>=0.29"],
         "onnx": ["onnxmltools", "skl2onnx"],
         "dev": ["pytest>=7.0", "black", "ruff", "hmmlearn>=0.3"],
     },
