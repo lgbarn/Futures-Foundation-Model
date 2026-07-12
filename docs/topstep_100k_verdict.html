@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Topstep 100K combine — go/no-go verdict</title>
+<style>
+/* doc-style.css — baseline for hand-written, self-contained HTML deliverables. */
+:root {
+  --fg: #1a1a1a;
+  --fg-muted: #57606a;
+  --bg: #ffffff;
+  --bg-soft: #f6f8fa;
+  --border: #d0d7de;
+  --accent: #0969da;
+  --pos: #1a7f37;
+  --neg: #cf222e;
+  --warn: #9a6700;
+  --code-bg: #f6f8fa;
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e6edf3;
+    --fg-muted: #9198a1;
+    --bg: #0d1117;
+    --bg-soft: #161b22;
+    --border: #30363d;
+    --accent: #4493f8;
+    --pos: #3fb950;
+    --neg: #f85149;
+    --warn: #d29922;
+    --code-bg: #161b22;
+  }
+}
+
+* , *::before, *::after { box-sizing: border-box; }
+
+html { font-size: 100%; -webkit-text-size-adjust: 100%; }
+
+body {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 4rem;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 1rem;
+  line-height: 1.65;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; margin: 2rem 0 1rem; }
+h1 { font-size: 2rem; padding-bottom: .3rem; border-bottom: 2px solid var(--border); margin-top: 0; }
+h2 { font-size: 1.5rem; padding-bottom: .25rem; border-bottom: 1px solid var(--border); }
+h3 { font-size: 1.25rem; }
+h4 { font-size: 1.05rem; color: var(--fg-muted); }
+
+p, ul, ol { margin: 0 0 1rem; }
+li { margin: .25rem 0; }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+strong { font-weight: 600; }
+
+hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
+
+blockquote {
+  margin: 1rem 0;
+  padding: .5rem 1rem;
+  border-left: 4px solid var(--border);
+  color: var(--fg-muted);
+  background: var(--bg-soft);
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: .9em;
+  background: var(--code-bg);
+  padding: .15em .4em;
+  border-radius: 4px;
+}
+
+pre {
+  background: var(--code-bg);
+  padding: 1rem;
+  border-radius: var(--radius);
+  overflow-x: auto;
+  border: 1px solid var(--border);
+}
+pre code { background: none; padding: 0; }
+
+table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .95rem; }
+th, td { padding: .5rem .75rem; border: 1px solid var(--border); text-align: left; }
+th { background: var(--bg-soft); font-weight: 600; }
+tbody tr:nth-child(even) { background: var(--bg-soft); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+img { max-width: 100%; height: auto; }
+svg { max-width: 100%; }
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+.stat {
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+}
+.stat .value { font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat .label { font-size: .8rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: .03em; }
+
+.pos { color: var(--pos); }
+.neg { color: var(--neg); }
+
+.callout { padding: .75rem 1rem; border-radius: var(--radius); border-left: 4px solid var(--accent); background: var(--bg-soft); margin: 1rem 0; }
+.callout.warn { border-left-color: var(--warn); }
+
+@media (max-width: 600px) {
+  body { padding: 1.5rem 1rem 3rem; }
+  h1 { font-size: 1.6rem; }
+  h2 { font-size: 1.3rem; }
+}
+
+@media print {
+  body { max-width: none; color: #000; background: #fff; }
+  a { color: #000; }
+}
+
+/* --- bespoke additions for this report --- */
+.verdict-banner {
+  border: 2px solid var(--warn);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  margin: 1.5rem 0;
+  background: var(--bg-soft);
+}
+.verdict-banner .word {
+  font-size: 2.2rem; font-weight: 700; color: var(--warn);
+  letter-spacing: .02em;
+}
+.gate-pass { color: var(--pos); font-weight: 700; }
+.gate-fail { color: var(--neg); font-weight: 700; }
+.fig { margin: 1.5rem 0; }
+.fig figcaption { font-size: .85rem; color: var(--fg-muted); margin-top: .35rem; }
+.fig .chartwrap { overflow-x: auto; }
+/* chart ink roles — light/dark aware (validated palette, see build notes) */
+.viz {
+  --surface-1: #fcfcfb;
+  --ink: #0b0b0b; --ink-2: #52514e; --ink-mut: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7;
+  --st-passed: #008300; --st-mll: #e34948; --st-dll: #eda100; --st-timeout: #2a78d6;
+  --series-1: #2a78d6;
+}
+@media (prefers-color-scheme: dark) {
+  .viz {
+    --surface-1: #161b22;
+    --ink: #ffffff; --ink-2: #c3c2b7; --ink-mut: #898781;
+    --grid: #2c2c2a; --axis: #383835;
+    --st-passed: #008300; --st-mll: #e66767; --st-dll: #c98500; --st-timeout: #3987e5;
+    --series-1: #3987e5;
+  }
+}
+.legend { display: flex; flex-wrap: wrap; gap: 1rem; font-size: .85rem; color: var(--fg-muted); margin: .25rem 0 .5rem; }
+.legend .key { display: inline-flex; align-items: center; gap: .4rem; }
+.legend .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+</style>
+</head>
+<body>
+
+<h1>Topstep 100K combine — go/no-go verdict</h1>
+<p><strong>PPO combine-manager on fractal-zigzag triggers</strong> — 3-seed confirmation of the
+Optuna sweep winner on a holdout the sweep never touched. Sweep: study
+<code>topstep-100k-v1</code>, 2023-01-02 → 2025-06-01. Holdout evaluation: test months
+<strong>2025-06 → 2026-06</strong>. Six symbols (NQ, ES, RTY, YM, GC, SI), one policy, one
+account. Report date 2026-07-12; issue #5, parent PRD #1.</p>
+
+<div class="verdict-banner">
+  <div class="word">VERDICT: ITERATE</div>
+  <p style="margin:.5rem 0 0">
+  The sweep winner fails every acceptance gate on the held-out year. Pooled
+  across three seeds, 3 of 852 combine attempts passed (0.35%) against the 60%
+  bar; 813 attempts (95.4%) busted the EOD-trailing max-loss; and the trained
+  policy <em>underperforms both no-skill baselines</em> — random-take passed
+  11.5% of its attempts and take-every-signal 5.2%, both with the same zero
+  skill and far less churn. Do not pay for a real combine on this
+  configuration. One materially different round (longer training, stronger
+  survival shaping, entry-quality filtering — see Next levers) is justified
+  before writing the approach off; but be clear that this is
+  <strong>DISCARD-leaning evidence</strong>: round one showed no positive
+  skill anywhere, and if round two cannot at least beat the no-skill
+  baselines, the honest verdict becomes DISCARD.</p>
+</div>
+
+<div class="stat-grid">
+  <div class="stat"><div class="value neg">0.35%</div>
+    <div class="label">pooled OOS pass rate (bar: 60%)</div></div>
+  <div class="stat"><div class="value">852</div>
+    <div class="label">combine attempts (3 seeds)</div></div>
+  <div class="stat"><div class="value neg">813</div>
+    <div class="label">account blowups (bar: 0)</div></div>
+  <div class="stat"><div class="value">3</div>
+    <div class="label">median days to target (3 passes)</div></div>
+</div>
+
+<h2>The question and the gates</h2>
+<p>Would a policy trading the fractal-zigzag triggers pass a Topstep 100K combine
+($6,000 profit target, $3,000 EOD-trailing max loss, $2,000 daily loss limit —
+soft breach, halts the day — 10-contract cap, 1 tick slippage per side +
+$1.40/side/contract commission)? The parent PRD sets three acceptance gates,
+all of which must pass before paying for a real combine attempt:</p>
+
+<table>
+  <thead><tr><th>Gate</th><th>Bar</th><th>Observed</th><th>Result</th></tr></thead>
+  <tbody>
+    <tr><td>1 — OOS combine pass rate</td><td>&ge; 60%</td>
+      <td>0.35% pooled over 852 attempts</td><td><span class="gate-fail">FAIL</span></td></tr>
+    <tr><td>2 — both baselines beaten</td><td>policy strictly &gt; each baseline</td>
+      <td>random-take: not beaten (11.5% vs 0.35%); take-every-signal: not beaten (5.2% vs 0.35%)</td><td><span class="gate-fail">FAIL</span></td></tr>
+    <tr><td>3 — seed stability</td><td>every seed &ge; 50% with zero blowups</td>
+      <td>seed 0: 0.7% / 290 busts; seed 1: 0.0% / 266 busts; seed 2: 0.4% / 257 busts</td><td><span class="gate-fail">FAIL</span></td></tr>
+  </tbody>
+</table>
+
+<h2>Protocol</h2>
+<p>The sweep (40 Optuna trials, TPE + median pruning, composite objective of pass
+rate, days-to-pass, and a zero-blowup floor) scored each trial over 26
+walk-forward windows (3 months train / 1 month test) on 2023-01-02 → 2025-06-01,
+training a fresh PPO policy (stable-baselines3 defaults, 10,000 timesteps) per
+window. The confirmation reruns the <em>logged winner configuration</em> — the trial-19
+knobs from the study storage (passed at 3-decimal precision; see Reproduction),
+nothing re-tuned — with only the seed varying (seeds 0, 1, 2), over the same
+3m/1m walk-forward protocol, on data whose <em>test months never appeared anywhere
+in the sweep</em>. Both no-skill
+baselines (random-take and take-every-signal, 1 contract, never flattening
+early) run through the identical evaluation seam. Terminal states come from the
+one pure combine simulator (<code>topstep.simulate_combine</code>) in every case.</p>
+
+<h3>The winning knobs (Optuna trial 19, study <code>topstep-100k-v1</code>)</h3>
+<table>
+  <thead><tr><th>Knob</th><th>Meaning</th><th class="num">Value</th></tr></thead>
+  <tbody>
+    <tr><td><code>activate_r</code></td><td>stop-move activation threshold (R multiples)</td><td class="num">0.554</td></tr>
+    <tr><td><code>trail_atr_k</code></td><td>trailing band (ATR multiples)</td><td class="num">2.518</td></tr>
+    <tr><td><code>dll_penalty</code></td><td>daily-loss proximity penalty (reward shaping)</td><td class="num">1.769</td></tr>
+    <tr><td><code>mll_penalty</code></td><td>trailing-drawdown proximity penalty (reward shaping)</td><td class="num">0.650</td></tr>
+  </tbody>
+</table>
+<p>Full precision, as logged: <code>activate_r=0.5538683666181621</code>,
+<code>trail_atr_k=2.5175435982558527</code>, <code>dll_penalty=1.7692588740326491</code>,
+<code>mll_penalty=0.64957433407365</code>; sweep seed 19. PPO hyperparameters stayed at
+stable-baselines3 defaults and trigger parameters were frozen, per the PRD.</p>
+
+<h2>What the sweep already said</h2>
+<p>The confirmation was run knowing the sweep verdict was already negative — the
+point of the 3-seed run is to make the negative result <em>solid</em>, not to rescue it.
+Across the 38 completed trials: <strong>19,841 pooled combine attempts, 18,813 busts
+(94.8%), 41 passes (0.2%)</strong>. Every completed trial scored below the blow floor
+(−100): every configuration blew accounts, repeatedly. The best composite score
+was −544 (trial 19); 39 of 40 trials had a 0% pass rate, one had 1% (trial 35).
+The three highest-<em>ranked</em> rows in the study (scores −117 to −120) are a pruned
+or interrupted trial's partial averages over a handful of windows, not better
+configurations.</p>
+
+<table>
+  <thead><tr><th class="num">Rank</th><th class="num">Trial</th><th>State</th><th class="num">Score</th><th class="num">Pass</th><th class="num">Busts</th><th class="num">Attempts</th></tr></thead>
+  <tbody>
+    <tr><td class="num">1</td><td class="num">16</td><td>pruned</td><td class="num">−117.0</td><td class="num">0%</td><td class="num">51</td><td class="num">54</td></tr>
+    <tr><td class="num">2</td><td class="num">0</td><td>interrupted</td><td class="num">−118.8</td><td class="num">0%</td><td class="num">150</td><td class="num">158</td></tr>
+    <tr><td class="num">3</td><td class="num">31</td><td>pruned</td><td class="num">−120.5</td><td class="num">0%</td><td class="num">41</td><td class="num">43</td></tr>
+    <tr><td class="num">4</td><td class="num"><strong>19 (winner)</strong></td><td>complete</td><td class="num">−544.0</td><td class="num">0%</td><td class="num">444</td><td class="num">470</td></tr>
+    <tr><td class="num">5</td><td class="num">21</td><td>complete</td><td class="num">−544.0</td><td class="num">0%</td><td class="num">444</td><td class="num">470</td></tr>
+    <tr><td class="num">…</td><td class="num">—</td><td>35 more completed trials</td><td class="num">−551 … −659</td><td class="num">0–1%</td><td class="num">451–559</td><td class="num">479–586</td></tr>
+  </tbody>
+</table>
+<p>Study bookkeeping: 41 logged trials — 38 complete, 2 pruned, 1 interrupted
+(<code>RUNNING</code> leftover from a restart; the study is resumable and trial numbering
+continued past it).</p>
+
+<h2>3-seed confirmation on the holdout</h2>
+<p>13 walk-forward windows covered test months 2025-06 through 2026-06 (the last
+window has only four June sessions). Each policy run saw 89,814 candidate
+signals and took 27,205–28,369 trades; each baseline took ~8,000 (the policy's
+early flattens shorten holds, so fewer signals arrive while a position is
+open). The three seeds agree — consistently negative: 0.7%, 0.0% and 0.4% pass
+rates with 257–290 trailing-max-loss busts each. The attempt counts are
+themselves diagnostic: the policy churns through 270–304 fresh $100K accounts
+where the baselines consume 87–116, because it busts roughly three times as
+fast. The sweep's in-sample verdict replicates out of sample with only the
+seed varying.</p>
+
+<figure class="fig">
+  <div class="legend">
+    <span class="key"><span class="sw" style="background:var(--st-passed)"></span>passed</span>
+    <span class="key"><span class="sw" style="background:var(--st-mll)"></span>busted (trailing MLL)</span>
+    <span class="key"><span class="sw" style="background:var(--st-dll)"></span>busted (DLL)</span>
+    <span class="key"><span class="sw" style="background:var(--st-timeout)"></span>timeout</span>
+  </div>
+  <div class="chartwrap">
+<svg class="viz" viewBox="0 0 800 202" width="800" height="202" role="img" aria-label="Terminal state composition per run">
+<text x="182" y="23" text-anchor="end" font-size="13" fill="var(--ink-2)">policy seed 0</text>
+<rect x="190.0" y="8" width="1.7" height="20" rx="2" fill="var(--st-passed)"><title>policy seed 0 — passed: 2 of 304 (1%)</title></rect>
+<rect x="193.7" y="8" width="532.2" height="20" rx="2" fill="var(--st-mll)"><title>policy seed 0 — busted-MLL: 290 of 304 (95%)</title></rect>
+<rect x="727.9" y="8" width="20.1" height="20" rx="2" fill="var(--st-timeout)"><title>policy seed 0 — timeout: 12 of 304 (4%)</title></rect>
+<text x="457" y="23" text-anchor="middle" font-size="12" fill="#ffffff">busted-MLL 95%</text>
+<text x="756" y="23" font-size="12" fill="var(--ink-mut)">304</text>
+<text x="182" y="57" text-anchor="end" font-size="13" fill="var(--ink-2)">policy seed 1</text>
+<rect x="190.0" y="42" width="533.8" height="20" rx="2" fill="var(--st-mll)"><title>policy seed 1 — busted-MLL: 266 of 278 (96%)</title></rect>
+<rect x="725.8" y="42" width="22.2" height="20" rx="2" fill="var(--st-timeout)"><title>policy seed 1 — timeout: 12 of 278 (4%)</title></rect>
+<text x="458" y="57" text-anchor="middle" font-size="12" fill="#ffffff">busted-MLL 96%</text>
+<text x="756" y="57" font-size="12" fill="var(--ink-mut)">278</text>
+<text x="182" y="91" text-anchor="end" font-size="13" fill="var(--ink-2)">policy seed 2</text>
+<rect x="190.0" y="76" width="1.0" height="20" rx="2" fill="var(--st-passed)"><title>policy seed 2 — passed: 1 of 270 (0%)</title></rect>
+<rect x="192.1" y="76" width="531.0" height="20" rx="2" fill="var(--st-mll)"><title>policy seed 2 — busted-MLL: 257 of 270 (95%)</title></rect>
+<rect x="725.1" y="76" width="22.9" height="20" rx="2" fill="var(--st-timeout)"><title>policy seed 2 — timeout: 12 of 270 (4%)</title></rect>
+<text x="457" y="91" text-anchor="middle" font-size="12" fill="#ffffff">busted-MLL 95%</text>
+<text x="756" y="91" font-size="12" fill="var(--ink-mut)">270</text>
+<text x="182" y="125" text-anchor="end" font-size="13" fill="var(--ink-2)">baseline random-take</text>
+<rect x="190.0" y="110" width="62.4" height="20" rx="2" fill="var(--st-passed)"><title>baseline random-take — passed: 10 of 87 (11%)</title></rect>
+<rect x="254.4" y="110" width="410.0" height="20" rx="2" fill="var(--st-mll)"><title>baseline random-take — busted-MLL: 64 of 87 (74%)</title></rect>
+<rect x="666.3" y="110" width="81.7" height="20" rx="2" fill="var(--st-timeout)"><title>baseline random-take — timeout: 13 of 87 (15%)</title></rect>
+<text x="396" y="125" text-anchor="middle" font-size="12" fill="#ffffff">busted-MLL 74%</text>
+<text x="756" y="125" font-size="12" fill="var(--ink-mut)">87</text>
+<text x="182" y="159" text-anchor="end" font-size="13" fill="var(--ink-2)">baseline take-every-signal</text>
+<rect x="190.0" y="144" width="27.0" height="20" rx="2" fill="var(--st-passed)"><title>baseline take-every-signal — passed: 6 of 116 (5%)</title></rect>
+<rect x="219.0" y="144" width="466.3" height="20" rx="2" fill="var(--st-mll)"><title>baseline take-every-signal — busted-MLL: 97 of 116 (84%)</title></rect>
+<rect x="687.2" y="144" width="60.8" height="20" rx="2" fill="var(--st-timeout)"><title>baseline take-every-signal — timeout: 13 of 116 (11%)</title></rect>
+<text x="424" y="159" text-anchor="middle" font-size="12" fill="#ffffff">busted-MLL 84%</text>
+<text x="756" y="159" font-size="12" fill="var(--ink-mut)">116</text>
+<text x="756" y="6" font-size="11" fill="var(--ink-mut)">att.</text>
+</svg>
+  </div>
+  <figcaption>Where combine attempts end, per run. Every bar is the full set of
+  rolling OOS attempts for that run; segment width is the share of attempts.
+  DLL busts are structurally zero: under published Topstep mechanics the daily
+  loss limit is a soft breach (the day halts, the account survives), so the
+  simulator never emits <code>busted-DLL</code>.</figcaption>
+</figure>
+
+<table>
+  <thead><tr><th>Run</th><th class="num">Attempts</th><th class="num">Passed</th><th class="num">Pass rate</th><th class="num">Busted (MLL)</th><th class="num">Timeout</th><th class="num">Median days to target</th><th class="num">Signals</th><th class="num">Taken</th></tr></thead>
+  <tbody>
+    <tr><td>policy seed 0</td><td class="num">304</td><td class="num">2</td><td class="num">0.7%</td><td class="num">290</td><td class="num">12</td><td class="num">3.0</td><td class="num">89,814</td><td class="num">28,369</td></tr>
+    <tr><td>policy seed 1</td><td class="num">278</td><td class="num">0</td><td class="num">0.0%</td><td class="num">266</td><td class="num">12</td><td class="num">n/a</td><td class="num">89,814</td><td class="num">27,872</td></tr>
+    <tr><td>policy seed 2</td><td class="num">270</td><td class="num">1</td><td class="num">0.4%</td><td class="num">257</td><td class="num">12</td><td class="num">6.0</td><td class="num">89,814</td><td class="num">27,205</td></tr>
+    <tr><td>baseline random-take</td><td class="num">87</td><td class="num">10</td><td class="num">11.5%</td><td class="num">64</td><td class="num">13</td><td class="num">6.0</td><td class="num">89,814</td><td class="num">7,665</td></tr>
+    <tr><td>baseline take-every-signal</td><td class="num">116</td><td class="num">6</td><td class="num">5.2%</td><td class="num">97</td><td class="num">13</td><td class="num">6.0</td><td class="num">89,814</td><td class="num">8,382</td></tr>
+  </tbody>
+</table>
+
+<h3>Bust breakdown</h3>
+<p>Every one of the 813 policy busts — and all 161 baseline busts — was
+<strong>busted-MLL</strong>, the $3,000 EOD-trailing max loss. DLL busts are zero by
+construction: the $2,000 daily loss limit is a soft breach (the session halts,
+the account survives, matching published Topstep mechanics), so its damage
+shows up a day or two later when the end-of-day trailing anchor catches the
+drawdown. The remaining 36 policy attempts (and 26 baseline attempts) timed out
+at the 30-session-day cap without reaching the $6,000 target. The three passes
+that did occur took 3–6 sessions and overshot the target wildly (final
+equities $109K–$188K against a $106K finish line) — lottery-ticket outcomes of
+the same oversized behavior that busts the other 95% of attempts, not evidence
+of skill.</p>
+
+<h3>Per-symbol attribution (policy, pooled across the 3 seeds)</h3>
+<figure class="fig">
+  <div class="chartwrap">
+<svg class="viz" viewBox="0 0 800 232" width="800" height="232" role="img" aria-label="Net P&amp;L per symbol, policy pooled over 3 seeds">
+<line x1="676.0" y1="4" x2="676.0" y2="212" stroke="var(--axis)" stroke-width="1"/>
+<text x="52" y="23" text-anchor="end" font-size="13" fill="var(--ink-2)">NQ</text>
+<rect x="527.3" y="8" width="148.7" height="20" rx="2" fill="var(--series-1)"><title>NQ: $-135,301 net over 25,296 trades</title></rect>
+<text x="521.3" y="23" text-anchor="end" font-size="12" fill="var(--ink)">$-135,301</text>
+<text x="52" y="57" text-anchor="end" font-size="13" fill="var(--ink-2)">ES</text>
+<rect x="60.0" y="42" width="616.0" height="20" rx="2" fill="var(--series-1)"><title>ES: $-560,586 net over 10,034 trades</title></rect>
+<text x="66.0" y="57" text-anchor="start" font-size="12" fill="#ffffff">$-560,586</text>
+<text x="52" y="91" text-anchor="end" font-size="13" fill="var(--ink-2)">RTY</text>
+<rect x="491.1" y="76" width="184.9" height="20" rx="2" fill="var(--series-1)"><title>RTY: $-168,282 net over 12,306 trades</title></rect>
+<text x="485.1" y="91" text-anchor="end" font-size="12" fill="var(--ink)">$-168,282</text>
+<text x="52" y="125" text-anchor="end" font-size="13" fill="var(--ink-2)">YM</text>
+<rect x="340.0" y="110" width="336.0" height="20" rx="2" fill="var(--series-1)"><title>YM: $-305,762 net over 9,672 trades</title></rect>
+<text x="334.0" y="125" text-anchor="end" font-size="12" fill="var(--ink)">$-305,762</text>
+<text x="52" y="159" text-anchor="end" font-size="13" fill="var(--ink-2)">GC</text>
+<rect x="311.4" y="144" width="364.6" height="20" rx="2" fill="var(--series-1)"><title>GC: $-331,792 net over 15,529 trades</title></rect>
+<text x="305.4" y="159" text-anchor="end" font-size="12" fill="var(--ink)">$-331,792</text>
+<text x="52" y="193" text-anchor="end" font-size="13" fill="var(--ink-2)">SI</text>
+<rect x="676.0" y="178" width="4.0" height="20" rx="2" fill="var(--series-1)"><title>SI: $3,633 net over 10,609 trades</title></rect>
+<text x="686.0" y="193" text-anchor="start" font-size="12" fill="var(--ink)">$3,633</text>
+</svg>
+  </div>
+  <figcaption>Net P&amp;L per symbol summed over all policy attempts across the three
+  seeds, derived from the simulator's own equity path (friction included). One
+  series — bar length carries the value; labels at the bar ends.</figcaption>
+</figure>
+
+<table>
+  <thead><tr><th>Symbol</th><th class="num">Trades</th><th class="num">Net P&amp;L</th><th class="num">Busting trades</th></tr></thead>
+  <tbody>
+    <tr><td>NQ</td><td class="num">25,296</td><td class="num neg">-$135,301</td><td class="num">215</td></tr>
+    <tr><td>ES</td><td class="num">10,034</td><td class="num neg">-$560,586</td><td class="num">63</td></tr>
+    <tr><td>RTY</td><td class="num">12,306</td><td class="num neg">-$168,282</td><td class="num">21</td></tr>
+    <tr><td>YM</td><td class="num">9,672</td><td class="num neg">-$305,762</td><td class="num">29</td></tr>
+    <tr><td>GC</td><td class="num">15,529</td><td class="num neg">-$331,792</td><td class="num">233</td></tr>
+    <tr><td>SI</td><td class="num">10,609</td><td class="num pos">+$3,633</td><td class="num">252</td></tr>
+  </tbody>
+</table>
+<p>The PRD's metals suspicion is confirmed: GC and SI carry the largest
+per-contract dollar swings and account for <strong>485 of the 813 busts</strong> (SI 252,
+GC 233) from only 31% of the trades — the sizing head and DLL-proximity
+observations did not tame them. ES is the largest net loser (−$560,586
+pooled); SI's small positive net (+$3,633, driven by one +$241K seed-2 window)
+does not offset its 252 account kills. No symbol is net-positive across all
+three seeds, so the failure is not one bad market — it is the sizing/exit
+behavior everywhere. (Dollar figures are sums over the simulator's own equity
+paths across all attempts, friction included; they measure behavior quality,
+not a tradable P&amp;L.)</p>
+
+<h2>Why ITERATE and not DISCARD</h2>
+<p>Two facts keep this at ITERATE — barely. First, the policy losing to its own
+no-skill baselines is a classic under-training symptom, not yet proof the
+approach is dead: at 10,000 PPO timesteps per window the policy learned to
+take 3.4x more trades than take-every-signal at learned sizes up to the
+10-contract cap, without learning the survival behavior the reward shaping was
+supposed to teach — the training budget, the shaping ranges, or both are
+inadequate, and neither has been given a fair test. Second, the baselines
+themselves put a measured ceiling on the raw signal: random-take at 1 contract
+passes 11.5% of attempts. That is 5x short of the 60% bar, but it is not zero
+— there is <em>some</em> exploitable edge in the triggers for a policy that sizes
+sanely. Against that: nothing in round one showed the RL layer adding value
+anywhere — every seed, every symbol, every window. This is DISCARD-leaning
+evidence. The concrete tripwire: if round two (levers below) still cannot beat
+both no-skill baselines, discard the PPO-combine-manager approach and keep
+only the simulator + verdict machinery.</p>
+
+<h2>Next levers (round two)</h2>
+<ul>
+  <li><strong>More PPO timesteps per window.</strong> 10,000 timesteps per (trial, window) is
+  laptop-scale; the policy barely leaves its initialization. The upstream
+  existence proof for this parameterization trained far longer. First lever:
+  raise timesteps 10–20× on the top handful of configurations and re-score.</li>
+  <li><strong>Reward-shaping ranges.</strong> Every trial busted, which says the searched
+  penalty ranges (<code>dll_penalty</code> 0–2, <code>mll_penalty</code> 0–4) never made
+  account-survival dominate the reward. Widen the MLL-proximity penalty range,
+  and consider a hard veto observation threshold near the trailing floor.</li>
+  <li><strong>Entry-quality filter.</strong> The take-every-signal baseline matching the policy
+  says the policy learned no useful take/skip discrimination at this budget.
+  Pre-filtering triggers (e.g. by the SSL backbone's win-rate head or a simple
+  R-quality gate) shrinks the action problem PPO has to solve.</li>
+  <li><strong>The study is resumable.</strong> <code>optuna_topstep_100k.db</code> persists all 41 trials;
+  round two extends the same study (<code>load_if_exists</code>) — trial numbering and
+  per-trial seeds continue without collision, so nothing from round one is lost.</li>
+</ul>
+
+<h2>Reproduction</h2>
+<pre><code># the sweep that produced the winner (already run; study is resumable)
+uv run python -m futures_foundation.rl.optuna_sweep \
+    --data-dir data --start 2023-01-02 --end 2025-06-01 \
+    --n-trials 40 --timesteps 10000 \
+    --storage sqlite:///optuna_topstep_100k.db --study-name topstep-100k-v1
+
+# the 3-seed confirmation behind this report (as actually run: winner knobs
+# at 3-decimal precision via --params; --storage/--study-name re-derives the
+# full-precision equivalent from the study)
+uv run python -m futures_foundation.rl.seed_confirm \
+    --data-dir data \
+    --params '{"activate_r": 0.554, "trail_atr_k": 2.518,
+               "dll_penalty": 1.769, "mll_penalty": 0.65}' \
+    --start 2025-03-01 --end 2026-06-04 \
+    --timesteps 10000 --seeds 0 1 2 \
+    --out seed_confirm_results.json</code></pre>
+<p>Data note: the 3-minute Parquet files under <code>data/</code> are gitignored run
+inputs — a fresh clone (or a git worktree) must restore them (or point
+<code>--data-dir</code> at a checkout that has them) before either command runs.</p>
+<p>Honesty notes: attempts within a window share one walk-forward policy, so they
+are not fully independent games; the per-contract $/R scale is set from the
+median stop distance over the loaded slice (the sweep did the same); training
+months 2025-03 → 2025-05 of the first confirmation window overlap the sweep's
+data range (training data only — every <em>test</em> month is post-2025-06 and was
+never seen by the sweep or the winner selection); and 10,000 PPO timesteps per
+window is a deliberate laptop-scale budget, which bounds how much skill this
+round could have demonstrated (see Next levers).</p>
+
+<hr>
+<p style="color:var(--fg-muted); font-size:.85rem">Generated 2026-07-12 —
+issue #5 (3-seed confirmation + go/no-go verdict report), parent PRD #1.
+Machinery: <code>futures_foundation/rl/seed_confirm.py</code>,
+<code>futures_foundation/rl/optuna_sweep.py</code>, <code>futures_foundation/rl/multi_combine.py</code>,
+<code>futures_foundation/topstep.py</code>.</p>
+</body>
+</html>
