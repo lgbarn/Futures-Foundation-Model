@@ -6,16 +6,24 @@ SB3 adapter wraps it later). No strategy IP — the env is fed pre-computed
 entries + the FFM context-head sequence; it does not detect anything.
 
 Decision structure (the converged design):
-  • if entry_filter: PRE_ENTRY action ∈ {veto, take}. Veto ends the
-    episode with reward −veto_cost (ASYMMETRIC take-bias: a veto must pay
-    for itself — this closes the "skip everything" collapse basin).
-  • IN_TRADE action ∈ {hold, exit}. Exit closes at the current bar.
-  • Hard risk stop (SL) is always mechanical (R = −1). Time stop at
-    max_hold. PPO learns the *exit*, not the risk.
+  • if entry_filter: PRE_ENTRY action ∈ {veto, take@size 1..max_size}.
+    Veto (action 0) ends the episode with reward −veto_cost (ASYMMETRIC
+    take-bias: a veto must pay for itself — this closes the "skip
+    everything" collapse basin). Action k ∈ 1..max_size enters with k
+    contracts; the size flows to fill infos and reward magnitude.
+  • IN_TRADE action: 0 = hold, ≥1 = flatten early at the next bar's close
+    (friction applied).
+  • Exits are trail-and-ride, run mechanically by the env: initial 1x ATR
+    stop (sl_distance IS the ATR unit, R = −1); once unrealized gain
+    reaches activate_r the stop arms and trails the favorable extreme with
+    a trail_atr_k*ATR band, ratcheting only — it NEVER widens. There is NO
+    fixed take-profit (tp_rr is accepted for detector-schema compat only).
+    Time stop at max_hold. PPO learns entry size + flatten-early, not the
+    risk.
 Observation = context-head vector ⊕ position-state
-  [in_trade, bars_held/max_hold, unrealized_R, room_to_sl_R].
-Reward is terminal (sparse, one per trade): realized R under the agent's
-chosen exit (long: (exit−entry)/sl ; short: (entry−exit)/sl).
+  [in_trade, bars_held/max_hold, unrealized_R, room_to_live_stop_R].
+Reward is terminal (sparse, one per trade): (realized R − friction_r) ×
+size under the agent's exit (long: (exit−entry)/sl ; short: (entry−exit)/sl).
 """
 import numpy as np
 
@@ -25,6 +33,7 @@ PRE_ENTRY, IN_TRADE, DONE = 0, 1, 2
 class SingleTradeEnv:
     def __init__(self, ctx, o, h, l, c, entry_bar, direction, sl_distance,
                  tp_rr=2.0, entry_filter=True, max_hold=130, veto_cost=0.02,
+                 max_size=10, trail_atr_k=2.0, activate_r=1.0, friction_r=0.0,
                  strategy=None, run_state=None):
         self.ctx = np.asarray(ctx, np.float32)          # (T, ctx_dim) from signal bar
         self.o = np.asarray(o, float); self.h = np.asarray(h, float)
@@ -36,12 +45,22 @@ class SingleTradeEnv:
         self.entry_filter = bool(entry_filter)
         self.max_hold = int(max_hold)
         self.veto_cost = float(veto_cost)
+        self.max_size = int(max_size)
+        # trailing-stop knobs: sl_distance IS the 1x-ATR unit, so the trail
+        # band is trail_atr_k * sl (mirrors primitives.realized_r_trailing)
+        self.trail_atr_k = float(trail_atr_k)
+        self.activate_r = float(activate_r)
+        # round-trip cost per contract in R units (slippage + commission),
+        # charged on every fill-out; 0.0 = frictionless (the old contract)
+        self.friction_r = float(friction_r)
         self.strategy = strategy
         self.run_state = run_state if run_state is not None else {"cum_r": []}
         self._extra = int(getattr(strategy, "extra_obs_dim", 0)) if strategy else 0
         self.ctx_dim = self.ctx.shape[1]
         self.obs_dim = self.ctx_dim + 4 + self._extra
-        self.action_dim = 2
+        # one flat Discrete space for both phases: PRE_ENTRY 0 = veto,
+        # 1..max_size = take at that size; IN_TRADE 0 = hold, >=1 = flatten
+        self.action_dim = 1 + self.max_size
         n = len(self.c)
         self._entry_i = self.entry_bar + 1              # entry = next-bar open
         self._tradable = (self._entry_i < n and self.sl > 0
@@ -52,18 +71,22 @@ class SingleTradeEnv:
         self.state = PRE_ENTRY if self.entry_filter else IN_TRADE
         self.t = self.entry_bar                         # decision bar (ctx index 0)
         self.bars_held = 0
+        self.size = 0
         self.entry_price = (self.o[self._entry_i]
                             if self._tradable else float("nan"))
         if not self.entry_filter:
-            self._enter()
+            self._enter(1)                              # pure-exit: unit size
         return self._obs()
 
-    def _enter(self):
+    def _enter(self, size):
         self.state = IN_TRADE
+        self.size = max(1, min(int(size), self.max_size))
         self.t = self._entry_i
         self.entry_price = self.o[self._entry_i]
         self.sl_price = (self.entry_price - self.sl if self.dir > 0
                          else self.entry_price + self.sl)
+        self._extreme = self.entry_price                # best favorable price
+        self._armed = False                             # trail not active yet
 
     def _ctx_at(self):
         i = min(self.t - self.entry_bar, len(self.ctx) - 1)
@@ -76,11 +99,15 @@ class SingleTradeEnv:
 
     def _obs(self):
         ur = self._unreal_R()
+        if self.state == IN_TRADE:                      # room to the LIVE stop
+            room = (self.c[self.t] - self.sl_price) * self.dir / self.sl
+        else:
+            room = 1.0 + ur                             # full 1x-ATR risk room
         pos = np.array([
             1.0 if self.state == IN_TRADE else 0.0,
             self.bars_held / max(self.max_hold, 1),
             ur,
-            1.0 + ur,                                   # room to SL in R
+            room,                                       # room to stop in R
         ], np.float32)
         base = np.concatenate([self._ctx_at(), pos]).astype(np.float32)
         if self.strategy is None or self._extra == 0:
@@ -94,10 +121,26 @@ class SingleTradeEnv:
                 f"extra_obs_dim {self._extra} = {self.obs_dim}")
         return aug
 
+    def _ratchet(self):
+        """Update the favorable extreme; once unrealized gain has reached
+        activate_r (in R), arm the trail and ratchet the stop toward
+        extreme ∓ trail_atr_k*sl. max/min guarantees the stop NEVER widens."""
+        self._extreme = (max(self._extreme, self.h[self.t]) if self.dir > 0
+                         else min(self._extreme, self.l[self.t]))
+        fav_r = (self._extreme - self.entry_price) * self.dir / self.sl
+        if not self._armed and fav_r >= self.activate_r:
+            self._armed = True
+        if self._armed:
+            band = self.trail_atr_k * self.sl
+            cand = (self._extreme - band if self.dir > 0
+                    else self._extreme + band)
+            self.sl_price = (max(self.sl_price, cand) if self.dir > 0
+                             else min(self.sl_price, cand))
+
     def _close(self, exit_price):
         r = float((exit_price - self.entry_price) * self.dir / self.sl)
         self.state = DONE
-        return r
+        return (r - self.friction_r) * self.size        # size scales reward
 
     def step(self, action):
         a = int(action)
@@ -109,8 +152,9 @@ class SingleTradeEnv:
             if a == 0:                                  # veto
                 self.state = DONE
                 return self._obs(), -self.veto_cost, True, False, {"veto": True}
-            self._enter()
-            return self._obs(), 0.0, False, False, {"entered": True}
+            self._enter(a)                              # take at size a
+            return (self._obs(), 0.0, False, False,
+                    {"entered": True, "size": self.size})
 
         # IN_TRADE: evaluation begins the bar AFTER entry (matches the
         # apply_rr_barriers convention range(entry_idx+1, ...)) — never the
@@ -118,15 +162,23 @@ class SingleTradeEnv:
         n = len(self.c)
         self.t += 1
         self.bars_held += 1
+        sz = {"size": self.size}
         if self.t >= n:                                 # no post-entry bars
             self.t = n - 1
-            return self._obs(), self._close(self.c[self.t]), True, False, {"timeout": True}
-        # mechanical SL first (risk is not the agent's choice)
+            return (self._obs(), self._close(self.c[self.t]), True, False,
+                    {"timeout": True, **sz})
+        # mechanical stop first — pessimistic intrabar convention (matches
+        # primitives.realized_r_trailing): a bar that both stops and extends
+        # is a stop. Uses the stop ratcheted on PRIOR bars; never this bar's.
         if (self.dir > 0 and self.l[self.t] <= self.sl_price) or \
            (self.dir < 0 and self.h[self.t] >= self.sl_price):
-            return self._obs(), self._close(self.sl_price), True, False, {"sl": True}
-        if a == 1:                                      # agent exits at this bar
-            return self._obs(), self._close(self.c[self.t]), True, False, {"exit": True}
+            return (self._obs(), self._close(self.sl_price), True, False,
+                    {"sl": True, "trailed": self._armed, **sz})
+        self._ratchet()                                 # arm/tighten the trail
+        if a >= 1:                                      # flatten early this bar
+            return (self._obs(), self._close(self.c[self.t]), True, False,
+                    {"exit": True, **sz})
         if self.bars_held >= self.max_hold:
-            return self._obs(), self._close(self.c[self.t]), True, False, {"timeout": True}
+            return (self._obs(), self._close(self.c[self.t]), True, False,
+                    {"timeout": True, **sz})
         return self._obs(), 0.0, False, False, {"hold": True}

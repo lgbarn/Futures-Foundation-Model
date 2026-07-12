@@ -50,6 +50,7 @@ def test_default_knobs_and_entry_filter_toggle():
     s = _SyntheticStrategy()
     assert s.entry_filter is True            # default: PPO learns chop-veto
     assert s.trail_atr_k == 2.0 and s.activate_r == 1.0 and s.max_hold == 130
+    assert s.max_size == 10 and s.friction_r == 0.0
     assert s.config_dict() == {}
 
     class _NoFilter(_SyntheticStrategy):
@@ -173,6 +174,140 @@ def test_env_pure_exit_starts_in_trade():
     while not term:
         obs, r, term, _, info = e.step(0)         # hold → timeout close
     assert info.get("timeout") or info.get("sl")
+
+
+def test_env_pre_entry_take_at_size_scales_fills_and_reward():
+    """AC: pre-entry action space is veto + size 1..10; the chosen size flows
+    through to fill quantities (info) and reward magnitude."""
+    def run(size_action):
+        ctx, o, h, l, c = _arrs(40, trend=2.0)
+        e = SingleTradeEnv(ctx, o, h, l, c, entry_bar=5, direction=1,
+                           sl_distance=1.0, entry_filter=True, max_hold=20)
+        assert e.action_dim == 11                 # veto + 10 size choices
+        e.reset()
+        obs, r, term, _, info = e.step(size_action)
+        assert not term and info.get("entered") and info["size"] == size_action
+        e.step(0)                                 # hold one bar
+        obs, r, term, _, info = e.step(1)         # flatten
+        assert term and info["size"] == size_action
+        return r
+    r1, r3 = run(1), run(3)
+    assert r1 > 0
+    assert r3 == pytest.approx(3.0 * r1)          # reward scales with size
+
+
+def test_env_trail_arms_at_activate_r_and_stop_never_widens():
+    """AC: the trail activates only at/after activate_r and the stop ratchets
+    monotonically — it NEVER widens, including through pullback bars."""
+    n = 14
+    o = np.full(n, 100.0); h = o + 0.5; l = o - 0.5; c = o.copy()
+    # entry_bar=5 → entry at bar 6 open = 100, sl=2 → initial stop 98
+    h[7], l[7], c[7] = 101.0, 99.5, 100.5    # fav_r 0.5 < activate_r → no arm
+    h[8], l[8], c[8] = 101.5, 100.0, 101.0   # fav_r 0.75 < 1.0 → still no arm
+    h[9], l[9], c[9] = 104.0, 101.0, 103.5   # fav_r 2.0 ≥ 1.0 → arm; trail
+    #                                          = 104 - 1.5*2 = 101
+    h[10], l[10], c[10] = 103.0, 101.5, 102.0  # pullback: cand unchanged —
+    #                                            stop must NOT widen
+    h[11], l[11], c[11] = 106.0, 102.0, 105.0  # new extreme → trail 103
+    ctx = np.zeros((n, 3), np.float32)
+    e = SingleTradeEnv(ctx, o, h, l, c, entry_bar=5, direction=1,
+                       sl_distance=2.0, entry_filter=False, max_hold=50,
+                       trail_atr_k=1.5, activate_r=1.0)
+    e.reset()
+    stops = []
+    for _ in range(5):                        # bars 7..11, always hold
+        obs, r, term, _, info = e.step(0)
+        assert not term
+        stops.append(e.sl_price)
+    # room-to-stop obs tracks the LIVE (ratcheted) stop: (105-103)/2 = 1R
+    assert obs[6] == pytest.approx(1.0)
+    assert stops[0] == stops[1] == pytest.approx(98.0)   # pre-activation: 1x
+    #                                                      ATR stop untouched
+    assert stops[2] == pytest.approx(101.0)              # armed → ratchet up
+    assert stops[3] == pytest.approx(101.0)              # pullback: no widen
+    assert stops[4] == pytest.approx(103.0)              # new extreme → up
+    assert all(b >= a for a, b in zip(stops, stops[1:]))  # monotone
+
+
+def test_env_short_trail_ratchets_down_and_never_widens():
+    """Short-direction mirror: the trail arms off the favorable LOW, ratchets
+    the stop DOWN via min, and never widens on pullback bars."""
+    n = 14
+    o = np.full(n, 100.0); h = o + 0.5; l = o - 0.5; c = o.copy()
+    # entry_bar=5 → short entry at bar 6 open = 100, sl=2 → initial stop 102
+    h[7], l[7], c[7] = 100.5, 99.0, 99.5     # fav_r 0.5 < 1.0 → no arm
+    h[8], l[8], c[8] = 100.0, 98.5, 99.0     # fav_r 0.75 → still no arm
+    h[9], l[9], c[9] = 99.0, 96.0, 96.5      # fav_r 2.0 ≥ 1.0 → arm; trail
+    #                                          = 96 + 1.5*2 = 99
+    h[10], l[10], c[10] = 98.5, 97.0, 98.0   # pullback up: stop must NOT widen
+    h[11], l[11], c[11] = 98.0, 94.0, 95.0   # new low extreme → trail 97
+    ctx = np.zeros((n, 3), np.float32)
+    e = SingleTradeEnv(ctx, o, h, l, c, entry_bar=5, direction=-1,
+                       sl_distance=2.0, entry_filter=False, max_hold=50,
+                       trail_atr_k=1.5, activate_r=1.0)
+    e.reset()
+    stops = []
+    for _ in range(5):                        # bars 7..11, always hold
+        _, r, term, _, info = e.step(0)
+        assert not term
+        stops.append(e.sl_price)
+    assert stops[0] == stops[1] == pytest.approx(102.0)  # pre-arm untouched
+    assert stops[2] == pytest.approx(99.0)               # armed → ratchet down
+    assert stops[3] == pytest.approx(99.0)               # pullback: no widen
+    assert stops[4] == pytest.approx(97.0)               # new extreme → down
+    assert all(b <= a for a, b in zip(stops, stops[1:]))  # monotone
+
+
+def test_env_runaway_winner_rides_trail_past_fixed_target():
+    """AC: a runaway winner exits on the TRAIL, not at any fixed take-profit —
+    realized R lands far beyond the detector's tp_rr, at trail-exit levels."""
+    n = 40
+    px = 100.0 + np.arange(n) * 1.0               # relentless uptrend
+    px[30:] = px[29] - 5.0                        # ...then a break that
+    #                                               finally tags the trail
+    o = px.copy(); h = px + 0.5; l = px - 0.5; c = px.copy()
+    ctx = np.zeros((n, 3), np.float32)
+    e = SingleTradeEnv(ctx, o, h, l, c, entry_bar=5, direction=1,
+                       sl_distance=2.0, tp_rr=2.0, entry_filter=True,
+                       max_hold=100, trail_atr_k=1.5, activate_r=1.0)
+    e.reset()
+    e.step(1)                                     # take, size 1
+    term, r, info = False, 0.0, {}
+    while not term:
+        _, r, term, _, info = e.step(0)           # ride — never flatten
+    assert info.get("sl") and info.get("trailed")  # exited on the trail
+    assert not info.get("timeout")
+    assert r > 2.0 * 2                            # way past tp_rr=2 (no TP)
+
+
+def test_env_immediate_loser_exits_at_1x_atr_for_minus_1R_times_size():
+    """AC: a synthetic immediate loser hits the untouched 1x ATR stop for
+    exactly -1R x size."""
+    ctx, o, h, l, c = _arrs(40, trend=1.0)
+    l2 = l.copy(); l2[7] = 90.0                   # crash straight through stop
+    e = SingleTradeEnv(ctx, o, h, l2, c, entry_bar=5, direction=1,
+                       sl_distance=1.0, entry_filter=True)
+    e.reset()
+    _, _, _, _, info = e.step(4)                  # take at size 4
+    assert info["size"] == 4
+    obs, r, term, _, info = e.step(0)             # hold into the crash bar
+    assert term and info.get("sl") and not info.get("trailed")
+    assert r == pytest.approx(-4.0, abs=1e-6)     # -1R x 4 contracts
+
+
+def test_env_flatten_early_fills_next_bar_close_with_friction():
+    """AC: the flatten-early action closes at the NEXT bar's price with
+    friction applied (friction_r per contract, scaled by size)."""
+    ctx, o, h, l, c = _arrs(40, trend=2.0)
+    e = SingleTradeEnv(ctx, o, h, l, c, entry_bar=5, direction=1,
+                       sl_distance=1.0, entry_filter=True, friction_r=0.05)
+    e.reset()
+    e.step(2)                                     # take at size 2 → entry 12
+    obs, r, term, _, info = e.step(1)             # flatten on the very next bar
+    assert term and info.get("exit") and info["size"] == 2
+    # decision after entry bar 6 → fills bar 7 close = 114; gross R = 2.0
+    gross = (c[7] - o[6]) / 1.0
+    assert r == pytest.approx((gross - 0.05) * 2)
 
 
 # ── causal-parity harness ────────────────────────────────────────────────────
@@ -395,7 +530,8 @@ def test_on_fold_complete_callback_and_override_receive_rich_info():
     assert all(not i.get("shuffle") for i in seen_cb)   # real folds only
     if info["trades"]:
         t = info["trades"][0]
-        assert {"dt", "r", "hold", "reason", "took"} <= set(t)
+        assert {"dt", "r", "hold", "reason", "size", "took"} <= set(t)
+        assert t["size"] >= 1 if t["took"] else t["size"] == 0
 
 
 def test_on_fold_complete_default_is_silent_noop():
@@ -405,6 +541,27 @@ def test_on_fold_complete_default_is_silent_noop():
                           RLConfig(seeds=(0,), shuffle_control=False),
                           trainer=_StubTrainer(_take_then_exit))
     assert set(res) == {"verdict", "multiseed", "per_seed"}
+
+
+def test_episodes_pass_strategy_exit_and_size_knobs_to_env():
+    """The driver hands every strategy knob to the env — trail-and-ride
+    exits and take-at-size are strategy-tunable, not hardcoded."""
+    from futures_foundation.rl.pipeline import _episodes
+
+    class _Knobbed(_WFStrategy):
+        name = "knobbed"
+        trail_atr_k = 1.25
+        activate_r = 0.5
+        max_size = 4
+        friction_r = 0.03
+
+    df, ctx = _wf_data()["ES"]
+    eps = _episodes(_Knobbed(), df, ctx, np.ones(len(df), bool), {"cum_r": []})
+    assert eps
+    env = eps[0][1]
+    assert env.trail_atr_k == 1.25 and env.activate_r == 0.5
+    assert env.max_size == 4 and env.action_dim == 5
+    assert env.friction_r == 0.03
 
 
 def test_episode_sampling_env_is_gymnasium_env():
@@ -422,6 +579,7 @@ def test_episode_sampling_env_is_gymnasium_env():
     assert eps, "need episodes for the test"
     env = _EpisodeSamplingEnv(eps[:50], seed=0)
     assert isinstance(env, gym.Env)                  # the SB3 requirement
+    assert env.action_space.n == eps[0][1].action_dim  # veto + sizes
     obs, info = env.reset(seed=0)
     assert obs.shape == (eps[0][1].obs_dim,) and isinstance(info, dict)
     o, r, term, trunc, i = env.step(env.action_space.sample())
@@ -445,4 +603,4 @@ def test_ppo_smoke_trains_on_synthetic_strategy():
     assert eps, "need episodes for the smoke run"
     trainer = make_ppo_trainer(total_timesteps=64, n_steps=32, batch_size=32)
     policy = trainer.train(eps[:20], seed=0)
-    assert policy(eps[0][1].reset()) in (0, 1)    # trained policy acts
+    assert policy(eps[0][1].reset()) in range(eps[0][1].action_dim)  # acts
