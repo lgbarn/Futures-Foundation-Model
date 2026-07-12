@@ -1,0 +1,125 @@
+"""Fractal-zigzag RLStrategy plug-in — acceptance-criteria seams (issue #7).
+
+One red→green seam per acceptance criterion:
+  1. entries truncation-invariant (the lookahead proof, prior art:
+     tests/test_fractal_pivots.py)
+  2. every candidate carries a 1x ATR initial stop at detection time
+  3. all six 3-min Parquet symbols load and produce plausible entry counts
+  4. observation features causal — same truncation proof on the vectors
+"""
+import os
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from futures_foundation.pipeline._primitives import compute_atr
+from futures_foundation.rl.base import get_strategy
+from futures_foundation.rl.causal import assert_causal
+from futures_foundation.rl.fractal_zigzag import (
+    OBS_FEATURE_NAMES, SYMBOLS, FractalZigzagStrategy, compute_obs_features,
+    load_3min_parquet)
+
+
+def _df(n=3000, seed=11):
+    """Synthetic 3-min OHLCV random walk with a tz-aware DatetimeIndex."""
+    rng = np.random.default_rng(seed)
+    c = 100 + rng.normal(0, 1, n).cumsum()
+    o = np.roll(c, 1); o[0] = c[0]
+    h = np.maximum(o, c) + np.abs(rng.normal(0, 0.3, n))
+    l = np.minimum(o, c) - np.abs(rng.normal(0, 0.3, n))
+    v = rng.integers(1, 1000, n).astype(float)
+    idx = pd.date_range("2021-04-05 13:30", periods=n, freq="3min", tz="UTC")
+    return pd.DataFrame({"open": o, "high": h, "low": l,
+                         "close": c, "volume": v}, index=idx)
+
+
+# ------------------------------------------------- AC 1: truncation invariance
+def test_entries_truncation_invariant():
+    """Entries on data[:t+1] == full-series entries with bar_idx <= t, for
+    every cut t — the causal-parity contract detect_entries must satisfy."""
+    df = _df()
+    strat = FractalZigzagStrategy()
+    detector = lambda d: strat.detect_entries(d, d, "NQ")
+    assert_causal(detector, df,
+                  cols=("bar_idx", "direction", "entry_price",
+                        "sl_distance", "tp_rr"))
+    # stronger, both directions: the prefix run emits EXACTLY the full-series
+    # entries up to the cut (live_edge semantics — no drift at the data edge)
+    full = detector(df)
+    assert len(full) > 10
+    for t in (500, 1400, 2600):
+        pref = detector(df.iloc[:t + 1]).reset_index(drop=True)
+        want = full[full["bar_idx"] <= t].reset_index(drop=True)
+        pd.testing.assert_frame_equal(pref, want)
+
+
+# ------------------------------------------------- AC 2: 1x ATR initial stop
+def test_every_entry_has_1x_atr_stop():
+    """sl_distance on every candidate == 1.0 * Wilder ATR at the signal bar
+    (attached at detection time), and stop_price sits exactly one stop
+    against the trade from the entry reference price."""
+    df = _df(seed=7)
+    strat = FractalZigzagStrategy()
+    ev = strat.detect_entries(df, df, "ES")
+    assert len(ev) > 10
+    atr = compute_atr(df["high"].values, df["low"].values,
+                      df["close"].values, strat.atr_period)
+    for _, e in ev.iterrows():
+        bi = int(e["bar_idx"])
+        assert e["direction"] in (1, -1)
+        assert np.isfinite(e["sl_distance"]) and e["sl_distance"] > 0
+        assert np.isclose(e["sl_distance"], 1.0 * atr[bi])
+        assert np.isclose(e["stop_price"],
+                          e["entry_price"] - e["direction"] * e["sl_distance"])
+        assert e["tp_rr"] == strat.tp_rr and e["tp_rr"] >= 1.0  # wired knob
+
+
+def test_registered_in_rl_registry():
+    """The pipeline looks the plug-in up by name — pin the registered key."""
+    assert isinstance(get_strategy("fractal_zigzag"), FractalZigzagStrategy)
+
+
+# --------------------------------------------- AC 4: causal obs features
+def test_obs_features_truncation_invariant():
+    """Row i of the observation-feature matrix is byte-identical whether the
+    future exists or not — the same truncation proof applied to the vectors."""
+    df = _df(seed=3)
+    F = compute_obs_features(df)
+    assert F.shape == (len(df), len(OBS_FEATURE_NAMES))
+    assert np.isfinite(F).all()
+    # non-degenerate: past ATR warm-up every feature column carries signal
+    # (an all-zeros matrix is trivially causal — that must not pass AC 4)
+    assert F[25:].std(axis=0).min() > 0
+    for t in (300, 1100, 2400):
+        Fp = compute_obs_features(df.iloc[:t + 1])
+        np.testing.assert_array_equal(Fp, F[:t + 1])
+
+
+# --------------------------------- AC 3: six symbols, plausible entry counts
+_DATA_DIR = Path(os.environ.get(
+    "FFM_DATA_DIR", Path(__file__).resolve().parents[1] / "data"))
+
+
+@pytest.mark.skipif(not (_DATA_DIR / "NQ_3min.parquet").exists(),
+                    reason="3-min Parquet data not present (local-only)")
+def test_six_symbols_load_and_produce_plausible_counts():
+    """Every symbol loads from Parquet, spans 2021-04 .. 2026-06, and yields
+    an entry rate in a plausible band for k=2 / 1.25-ATR-leg pivots on 3-min
+    bars (neither degenerate silence nor per-bar noise)."""
+    strat = FractalZigzagStrategy()
+    assert set(SYMBOLS) == {"NQ", "ES", "RTY", "YM", "GC", "SI"}
+    for sym in SYMBOLS:
+        df = load_3min_parquet(_DATA_DIR / f"{sym}_3min.parquet")
+        assert list(df.columns) == ["open", "high", "low", "close", "volume"]
+        assert isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None
+        assert df.index.is_monotonic_increasing
+        assert df.index[0] <= pd.Timestamp("2021-05-01", tz="UTC")
+        assert df.index[-1] >= pd.Timestamp("2026-06-01", tz="UTC")
+        ev = strat.detect_entries(df, df, sym)
+        rate = len(ev) / len(df)
+        assert 1 / 500 < rate < 1 / 5, (sym, len(df), len(ev))
+        assert (ev["sl_distance"] > 0).all()
+        assert ev["bar_idx"].is_monotonic_increasing
+
