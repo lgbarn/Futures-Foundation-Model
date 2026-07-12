@@ -195,6 +195,39 @@ def test_env_pre_entry_take_at_size_scales_fills_and_reward():
     assert r3 == pytest.approx(3.0 * r1)          # reward scales with size
 
 
+def test_env_trail_arms_at_activate_r_and_stop_never_widens():
+    """AC: the trail activates only at/after activate_r and the stop ratchets
+    monotonically — it NEVER widens, including through pullback bars."""
+    n = 14
+    o = np.full(n, 100.0); h = o + 0.5; l = o - 0.5; c = o.copy()
+    # entry_bar=5 → entry at bar 6 open = 100, sl=2 → initial stop 98
+    h[7], l[7], c[7] = 101.0, 99.5, 100.5    # fav_r 0.5 < activate_r → no arm
+    h[8], l[8], c[8] = 101.5, 100.0, 101.0   # fav_r 0.75 < 1.0 → still no arm
+    h[9], l[9], c[9] = 104.0, 101.0, 103.5   # fav_r 2.0 ≥ 1.0 → arm; trail
+    #                                          = 104 - 1.5*2 = 101
+    h[10], l[10], c[10] = 103.0, 101.5, 102.0  # pullback: cand unchanged —
+    #                                            stop must NOT widen
+    h[11], l[11], c[11] = 106.0, 102.0, 105.0  # new extreme → trail 103
+    ctx = np.zeros((n, 3), np.float32)
+    e = SingleTradeEnv(ctx, o, h, l, c, entry_bar=5, direction=1,
+                       sl_distance=2.0, entry_filter=False, max_hold=50,
+                       trail_atr_k=1.5, activate_r=1.0)
+    e.reset()
+    stops = []
+    for _ in range(5):                        # bars 7..11, always hold
+        obs, r, term, _, info = e.step(0)
+        assert not term
+        stops.append(e.sl_price)
+    # room-to-stop obs tracks the LIVE (ratcheted) stop: (105-103)/2 = 1R
+    assert obs[6] == pytest.approx(1.0)
+    assert stops[0] == stops[1] == pytest.approx(98.0)   # pre-activation: 1x
+    #                                                      ATR stop untouched
+    assert stops[2] == pytest.approx(101.0)              # armed → ratchet up
+    assert stops[3] == pytest.approx(101.0)              # pullback: no widen
+    assert stops[4] == pytest.approx(103.0)              # new extreme → up
+    assert all(b >= a for a, b in zip(stops, stops[1:]))  # monotone
+
+
 # ── causal-parity harness ────────────────────────────────────────────────────
 from futures_foundation.rl.causal import check_causal, assert_causal
 

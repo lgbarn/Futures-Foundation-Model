@@ -25,7 +25,8 @@ PRE_ENTRY, IN_TRADE, DONE = 0, 1, 2
 class SingleTradeEnv:
     def __init__(self, ctx, o, h, l, c, entry_bar, direction, sl_distance,
                  tp_rr=2.0, entry_filter=True, max_hold=130, veto_cost=0.02,
-                 max_size=10, strategy=None, run_state=None):
+                 max_size=10, trail_atr_k=2.0, activate_r=1.0,
+                 strategy=None, run_state=None):
         self.ctx = np.asarray(ctx, np.float32)          # (T, ctx_dim) from signal bar
         self.o = np.asarray(o, float); self.h = np.asarray(h, float)
         self.l = np.asarray(l, float); self.c = np.asarray(c, float)
@@ -37,6 +38,10 @@ class SingleTradeEnv:
         self.max_hold = int(max_hold)
         self.veto_cost = float(veto_cost)
         self.max_size = int(max_size)
+        # trailing-stop knobs: sl_distance IS the 1x-ATR unit, so the trail
+        # band is trail_atr_k * sl (mirrors primitives.realized_r_trailing)
+        self.trail_atr_k = float(trail_atr_k)
+        self.activate_r = float(activate_r)
         self.strategy = strategy
         self.run_state = run_state if run_state is not None else {"cum_r": []}
         self._extra = int(getattr(strategy, "extra_obs_dim", 0)) if strategy else 0
@@ -69,6 +74,8 @@ class SingleTradeEnv:
         self.entry_price = self.o[self._entry_i]
         self.sl_price = (self.entry_price - self.sl if self.dir > 0
                          else self.entry_price + self.sl)
+        self._extreme = self.entry_price                # best favorable price
+        self._armed = False                             # trail not active yet
 
     def _ctx_at(self):
         i = min(self.t - self.entry_bar, len(self.ctx) - 1)
@@ -81,11 +88,15 @@ class SingleTradeEnv:
 
     def _obs(self):
         ur = self._unreal_R()
+        if self.state == IN_TRADE:                      # room to the LIVE stop
+            room = (self.c[self.t] - self.sl_price) * self.dir / self.sl
+        else:
+            room = 1.0 + ur                             # full 1x-ATR risk room
         pos = np.array([
             1.0 if self.state == IN_TRADE else 0.0,
             self.bars_held / max(self.max_hold, 1),
             ur,
-            1.0 + ur,                                   # room to SL in R
+            room,                                       # room to stop in R
         ], np.float32)
         base = np.concatenate([self._ctx_at(), pos]).astype(np.float32)
         if self.strategy is None or self._extra == 0:
@@ -98,6 +109,22 @@ class SingleTradeEnv:
                 f"{aug.shape[0]} feats; expected base {len(base)} + "
                 f"extra_obs_dim {self._extra} = {self.obs_dim}")
         return aug
+
+    def _ratchet(self):
+        """Update the favorable extreme; once unrealized gain has reached
+        activate_r (in R), arm the trail and ratchet the stop toward
+        extreme ∓ trail_atr_k*sl. max/min guarantees the stop NEVER widens."""
+        self._extreme = (max(self._extreme, self.h[self.t]) if self.dir > 0
+                         else min(self._extreme, self.l[self.t]))
+        fav_r = (self._extreme - self.entry_price) * self.dir / self.sl
+        if not self._armed and fav_r >= self.activate_r:
+            self._armed = True
+        if self._armed:
+            band = self.trail_atr_k * self.sl
+            cand = (self._extreme - band if self.dir > 0
+                    else self._extreme + band)
+            self.sl_price = (max(self.sl_price, cand) if self.dir > 0
+                             else min(self.sl_price, cand))
 
     def _close(self, exit_price):
         r = float((exit_price - self.entry_price) * self.dir / self.sl)
@@ -129,11 +156,14 @@ class SingleTradeEnv:
             self.t = n - 1
             return (self._obs(), self._close(self.c[self.t]), True, False,
                     {"timeout": True, **sz})
-        # mechanical SL first (risk is not the agent's choice)
+        # mechanical stop first — pessimistic intrabar convention (matches
+        # primitives.realized_r_trailing): a bar that both stops and extends
+        # is a stop. Uses the stop ratcheted on PRIOR bars; never this bar's.
         if (self.dir > 0 and self.l[self.t] <= self.sl_price) or \
            (self.dir < 0 and self.h[self.t] >= self.sl_price):
             return (self._obs(), self._close(self.sl_price), True, False,
-                    {"sl": True, **sz})
+                    {"sl": True, "trailed": self._armed, **sz})
+        self._ratchet()                                 # arm/tighten the trail
         if a >= 1:                                      # flatten early this bar
             return (self._obs(), self._close(self.c[self.t]), True, False,
                     {"exit": True, **sz})
