@@ -25,7 +25,7 @@ PRE_ENTRY, IN_TRADE, DONE = 0, 1, 2
 class SingleTradeEnv:
     def __init__(self, ctx, o, h, l, c, entry_bar, direction, sl_distance,
                  tp_rr=2.0, entry_filter=True, max_hold=130, veto_cost=0.02,
-                 max_size=10, trail_atr_k=2.0, activate_r=1.0,
+                 max_size=10, trail_atr_k=2.0, activate_r=1.0, friction_r=0.0,
                  strategy=None, run_state=None):
         self.ctx = np.asarray(ctx, np.float32)          # (T, ctx_dim) from signal bar
         self.o = np.asarray(o, float); self.h = np.asarray(h, float)
@@ -42,6 +42,9 @@ class SingleTradeEnv:
         # band is trail_atr_k * sl (mirrors primitives.realized_r_trailing)
         self.trail_atr_k = float(trail_atr_k)
         self.activate_r = float(activate_r)
+        # round-trip cost per contract in R units (slippage + commission),
+        # charged on every fill-out; 0.0 = frictionless (the old contract)
+        self.friction_r = float(friction_r)
         self.strategy = strategy
         self.run_state = run_state if run_state is not None else {"cum_r": []}
         self._extra = int(getattr(strategy, "extra_obs_dim", 0)) if strategy else 0
@@ -129,7 +132,7 @@ class SingleTradeEnv:
     def _close(self, exit_price):
         r = float((exit_price - self.entry_price) * self.dir / self.sl)
         self.state = DONE
-        return r * self.size                            # size scales reward
+        return (r - self.friction_r) * self.size        # size scales reward
 
     def step(self, action):
         a = int(action)

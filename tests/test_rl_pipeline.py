@@ -265,6 +265,21 @@ def test_env_immediate_loser_exits_at_1x_atr_for_minus_1R_times_size():
     assert r == pytest.approx(-4.0, abs=1e-6)     # -1R x 4 contracts
 
 
+def test_env_flatten_early_fills_next_bar_close_with_friction():
+    """AC: the flatten-early action closes at the NEXT bar's price with
+    friction applied (friction_r per contract, scaled by size)."""
+    ctx, o, h, l, c = _arrs(40, trend=2.0)
+    e = SingleTradeEnv(ctx, o, h, l, c, entry_bar=5, direction=1,
+                       sl_distance=1.0, entry_filter=True, friction_r=0.05)
+    e.reset()
+    e.step(2)                                     # take at size 2 → entry 12
+    obs, r, term, _, info = e.step(1)             # flatten on the very next bar
+    assert term and info.get("exit") and info["size"] == 2
+    # decision after entry bar 6 → fills bar 7 close = 114; gross R = 2.0
+    gross = (c[7] - o[6]) / 1.0
+    assert r == pytest.approx((gross - 0.05) * 2)
+
+
 # ── causal-parity harness ────────────────────────────────────────────────────
 from futures_foundation.rl.causal import check_causal, assert_causal
 
