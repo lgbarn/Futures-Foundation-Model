@@ -38,7 +38,6 @@ def _EpisodeSamplingEnv(episodes, seed):
             # terminal reward and may StopIteration = account blown → reset
             # the simulated account so PPO lives many lifetimes and learns
             # to avoid zero.
-            self.strategy = getattr(e0, "strategy", None)
             self.run_state = getattr(e0, "run_state", {"cum_r": []})
             self.observation_space = gym.spaces.Box(
                 -np.inf, np.inf, (obs_dim,), np.float32)
@@ -52,9 +51,13 @@ def _EpisodeSamplingEnv(episodes, seed):
 
         def step(self, action):
             obs, r, term, trunc, info = self.cur.step(action)
-            if (term or trunc) and self.strategy is not None:
+            # shape through the CURRENT episode's strategy — with multi-
+            # symbol episodes each arm books its own symbol's fills into
+            # the shared account (single-strategy runs are unchanged)
+            strategy = getattr(self.cur, "strategy", None)
+            if (term or trunc) and strategy is not None:
                 try:
-                    r = float(self.strategy.shape_reward(r, self.run_state))
+                    r = float(strategy.shape_reward(r, self.run_state))
                     self.run_state["cum_r"].append(r)
                 except StopIteration:           # account blown
                     r = -1.0                    # strong terminal penalty
