@@ -76,7 +76,7 @@ class CombineResult:
 _EPS = 0.005
 
 
-def _net_pnl(fill: Fill, rules: CombineRules) -> float:
+def _validate(fill: Fill, rules: CombineRules) -> None:
     if not 1 <= abs(fill.qty) <= rules.max_contracts:
         raise ValueError(
             f"contract-cap violation: fill of {fill.qty} contracts on {fill.symbol} "
@@ -86,6 +86,9 @@ def _net_pnl(fill: Fill, rules: CombineRules) -> float:
         raise KeyError(
             f"unknown symbol {fill.symbol!r}: no tick spec (known: {sorted(SYMBOL_SPECS)})"
         )
+
+
+def _net_pnl(fill: Fill, rules: CombineRules) -> float:
     tick_size, tick_value = SYMBOL_SPECS[fill.symbol]
     gross = fill.qty * (fill.exit - fill.entry) * (tick_value / tick_size)
     friction = abs(fill.qty) * 2.0 * (rules.slippage_ticks * tick_value + rules.commission_per_side)
@@ -94,6 +97,11 @@ def _net_pnl(fill: Fill, rules: CombineRules) -> float:
 
 def simulate_combine(fills: Sequence[Fill], rules: CombineRules = TOPSTEP_100K) -> CombineResult:
     """Run one combine attempt over ``fills``. Pure: same fills in, same result out."""
+    # Validate every fill up front — a malformed fill is rejected loudly even
+    # if it lands on a DLL-halted day or after the attempt has ended.
+    for fill in fills:
+        _validate(fill, rules)
+
     equity = rules.start_balance
     path: list[float] = []
     state = TIMEOUT
@@ -119,12 +127,12 @@ def simulate_combine(fills: Sequence[Fill], rules: CombineRules = TOPSTEP_100K) 
             days += 1
             last_day = fill.day
 
-        # MLL threshold trails the anchor and locks at the starting balance.
-        mll_floor = min(rules.start_balance, anchor - rules.max_loss)
-
         if halted:  # DLL soft breach: fills for the rest of the day are ignored
             path.append(equity)
             continue
+
+        # MLL threshold trails the anchor and locks at the starting balance.
+        mll_floor = min(rules.start_balance, anchor - rules.max_loss)
 
         pnl = _net_pnl(fill, rules)
         equity += pnl

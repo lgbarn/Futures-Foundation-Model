@@ -252,3 +252,52 @@ def test_unknown_symbol_rejected_loudly():
 def test_out_of_order_days_rejected():
     with pytest.raises(ValueError, match="order"):
         simulate_combine([ym(2, 100.0), ym(1, 100.0)])
+
+
+def test_cap_violation_on_dll_halted_day_still_raises():
+    # A malformed fill must be rejected loudly even when it lands on a day
+    # already halted by the DLL (it would otherwise be skipped unexamined).
+    with pytest.raises(ValueError, match="contract"):
+        simulate_combine([
+            ym(1, -2_100.0),  # DLL halt
+            Fill(day=1, symbol="NQ", qty=11, entry=15_000.0, exit=15_001.0),
+        ])
+
+
+# ---------------------------------------------------------------------------
+# Seam edges: empty input, rules overrides, DLL halt interacting with a pass.
+# ---------------------------------------------------------------------------
+
+def test_empty_fills_is_timeout_with_zero_days():
+    res = simulate_combine([])
+    assert res.state == "timeout"
+    assert res.days == 0
+    assert len(res.equity) == 0
+
+
+def test_rules_override_is_respected():
+    from dataclasses import replace
+
+    from futures_foundation.topstep import TOPSTEP_100K
+
+    tier = replace(TOPSTEP_100K, profit_target=1_000.0, max_contracts=2)
+    # Lower target: two balanced +500 days pass under the override...
+    res = simulate_combine([ym(1, 500.0), ym(2, 500.0)], rules=tier)
+    assert res.state == "passed"
+    # ...and the lower contract cap is enforced.
+    with pytest.raises(ValueError, match="contract"):
+        simulate_combine([Fill(day=1, symbol="NQ", qty=3, entry=1.0, exit=1.0)], rules=tier)
+
+
+def test_pass_still_reachable_after_earlier_dll_halted_day():
+    # Day 1 is a DLL-halted loss day; the account recovers and passes later.
+    res = simulate_combine([
+        ym(1, -2_100.0),
+        ym(1, 999.0),     # skipped: halted
+        ym(2, 3_000.0),
+        ym(3, 3_000.0),
+        ym(4, 2_100.0),   # profit 6,000; best day 3,000 = 50% -> passed
+    ])
+    assert res.state == "passed"
+    assert res.days == 4
+    assert res.equity[-1] == pytest.approx(START + 6_000.0)
