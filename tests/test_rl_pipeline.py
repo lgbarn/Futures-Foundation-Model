@@ -175,6 +175,26 @@ def test_env_pure_exit_starts_in_trade():
     assert info.get("timeout") or info.get("sl")
 
 
+def test_env_pre_entry_take_at_size_scales_fills_and_reward():
+    """AC: pre-entry action space is veto + size 1..10; the chosen size flows
+    through to fill quantities (info) and reward magnitude."""
+    def run(size_action):
+        ctx, o, h, l, c = _arrs(40, trend=2.0)
+        e = SingleTradeEnv(ctx, o, h, l, c, entry_bar=5, direction=1,
+                           sl_distance=1.0, entry_filter=True, max_hold=20)
+        assert e.action_dim == 11                 # veto + 10 size choices
+        e.reset()
+        obs, r, term, _, info = e.step(size_action)
+        assert not term and info.get("entered") and info["size"] == size_action
+        e.step(0)                                 # hold one bar
+        obs, r, term, _, info = e.step(1)         # flatten
+        assert term and info["size"] == size_action
+        return r
+    r1, r3 = run(1), run(3)
+    assert r1 > 0
+    assert r3 == pytest.approx(3.0 * r1)          # reward scales with size
+
+
 # ── causal-parity harness ────────────────────────────────────────────────────
 from futures_foundation.rl.causal import check_causal, assert_causal
 
