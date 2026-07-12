@@ -28,18 +28,22 @@ THE documented command (laptop-scale, minutes on CPU/MPS):
         --start 2024-01-02 --split 2024-04-01 --end 2024-05-01 \
         --timesteps 15000
 """
+import argparse
+from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
 
 from futures_foundation.topstep import (
-    BUSTED_MLL, PASSED, TOPSTEP_100K, CombineRules, Fill, simulate_combine)
+    BUSTED_MLL, PASSED, SYMBOL_SPECS, TOPSTEP_100K, CombineRules, Fill,
+    simulate_combine)
 
 from .base import register
 from .combine_tracer import rollout_episode
 from .env import SingleTradeEnv
-from .fractal_zigzag import SYMBOLS
+from .fractal_zigzag import SYMBOLS, compute_obs_features, load_3min_parquet
+from .pipeline import _episodes
 from .topstep_zigzag import TopstepZigzagStrategy, account_features
 
 
@@ -199,3 +203,120 @@ def summarize_attempts(attempts) -> dict:
             "timeout": n - passed - busted,
             "median_days_to_pass": (float(np.median(pass_days))
                                     if pass_days else None)}
+
+
+# ── CLI: six-symbol run with policy + both baselines ─────────────────────────
+def _report(name: str, result: dict, rules: CombineRules) -> None:
+    attempts = result["attempts"]
+    print(f"-- {name} --")
+    print(f"signals={result['signals']}  taken={result['taken']}  "
+          f"skipped-while-open={result['skipped_while_open']}")
+    for i, a in enumerate(attempts, 1):
+        note = f"  ({a['note']})" if a["note"] else ""
+        print(f"attempt {i}: {a['state']:<11} days={a['days']:<3} "
+              f"trades={a['trades']:<4} final equity=${a['equity']:,.2f}"
+              f"{note}")
+    s = summarize_attempts(attempts)
+    if s["attempts"] == 0:
+        print(f"verdict[{name}]: NO-ATTEMPTS — no OOS trades taken")
+        return
+    busts = ", ".join(f"{k}={v}" for k, v in s["bust_breakdown"].items())
+    med = (f"{s['median_days_to_pass']:.1f}" if s["median_days_to_pass"]
+           is not None else "n/a")
+    print(f"verdict[{name}]: attempts={s['attempts']}  "
+          f"passed={s['passed']} ({s['pass_rate']:.0%})  "
+          f"busted={s['busted']}{f' [{busts}]' if busts else ''}  "
+          f"timeout={s['timeout']}  median-days-to-pass={med}")
+    attrib = per_symbol_attribution(attempts, rules)
+    for sym in SYMBOLS:
+        if sym in attrib:
+            a = attrib[sym]
+            print(f"  {sym:<4} trades={a['trades']:<4} "
+                  f"net=${a['net_pnl']:>12,.2f}  busts={a['busts']}")
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(
+        description="Six-symbol Topstep 100K combine: one policy, one "
+                    "account, rolling OOS attempts, no-skill baselines.")
+    p.add_argument("--data-dir", default="data",
+                   help="directory holding <SYM>_3min.parquet files")
+    p.add_argument("--symbols", nargs="+", default=list(SYMBOLS),
+                   choices=sorted(SYMBOL_SPECS))
+    p.add_argument("--start", default="2024-01-02")
+    p.add_argument("--split", default="2024-04-01",
+                   help="train on [start, split), evaluate on [split, end)")
+    p.add_argument("--end", default="2024-05-01")
+    p.add_argument("--timesteps", type=int, default=15_000)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--baseline-seed", type=int, default=0,
+                   help="rng seed for the random-take baseline")
+    p.add_argument("--max-days", type=int, default=30,
+                   help="session days per combine attempt before timeout")
+    p.add_argument("--trades-per-day", type=int, default=6,
+                   help="synthetic session-day length during training")
+    p.add_argument("--dll-penalty", type=float, default=0.5)
+    p.add_argument("--mll-penalty", type=float, default=1.0)
+    p.add_argument("--pass-bonus", type=float, default=2.0)
+    args = p.parse_args(argv)
+
+    split_ts = pd.Timestamp(args.split, tz="UTC")
+    rs_train, rs_test = {"cum_r": []}, {"cum_r": []}
+    train_eps, test_eps = [], []
+    print(f"== Topstep 100K six-symbol combine: {' '.join(args.symbols)} ==")
+    for sym in args.symbols:
+        df = load_3min_parquet(Path(args.data_dir) / f"{sym}_3min.parquet")
+        df = df.loc[pd.Timestamp(args.start, tz="UTC"):
+                    pd.Timestamp(args.end, tz="UTC")]
+        ctx = compute_obs_features(df)
+        strat = SixSymbolTopstepStrategy(
+            symbol=sym, trades_per_day=args.trades_per_day,
+            dll_penalty=args.dll_penalty, mll_penalty=args.mll_penalty,
+            pass_bonus=args.pass_bonus)
+        entries = strat.detect_entries(df, df, sym)
+        tick_size, tick_value = SYMBOL_SPECS[sym]
+        strat.dollars_per_r = (float(np.median(entries["sl_distance"]))
+                               * tick_value / tick_size)
+        tr = _episodes(strat, df, ctx, np.asarray(df.index < split_ts),
+                       rs_train)
+        te = _episodes(strat, df, ctx, np.asarray(df.index >= split_ts),
+                       rs_test)
+        train_eps += tr
+        test_eps += [SymbolEpisode(dt, env, strat, df.index)
+                     for dt, env in te]
+        print(f"{sym}: bars={len(df):,}  entries {len(tr)} train / "
+              f"{len(te)} test  ${strat.dollars_per_r:,.2f}/R/contract")
+    if not train_eps or not test_eps:
+        print("verdict: NO-RUN — not enough entries on this slice")
+        return
+    env0 = test_eps[0].env
+    print(f"obs_dim = {env0.obs_dim} = ctx {env0.ctx_dim} + position 4 + "
+          f"account 3 + symbol one-hot {len(SYMBOLS)}")
+
+    print(f"training ONE policy on {len(train_eps):,} episodes across "
+          f"{len(args.symbols)} symbols for {args.timesteps:,} timesteps "
+          f"(seed {args.seed}) ...")
+    from .ppo import make_ppo_trainer          # lazy: needs SB3 + gymnasium
+    policy = make_ppo_trainer(total_timesteps=args.timesteps).train(
+        train_eps, args.seed)
+    print(f"training accounts blown: {rs_train.get('topstep_busts', 0)}   "
+          f"combines passed in training: "
+          f"{rs_train.get('topstep_passes', 0)}")
+
+    print("== rolling OOS combine attempts (terminal states from "
+          "topstep.simulate_combine) ==")
+    ctx_dim = env0.ctx_dim
+    runs = [("policy", policy),
+            ("baseline random-take",
+             random_take_policy(ctx_dim, args.baseline_seed)),
+            ("baseline take-every-signal", take_every_signal_policy(ctx_dim))]
+    for name, pol in runs:
+        result = evaluate_account_attempts(pol, test_eps,
+                                           rules=TOPSTEP_100K,
+                                           max_days=args.max_days,
+                                           run_state=rs_test)
+        _report(name, result, TOPSTEP_100K)
+
+
+if __name__ == "__main__":
+    main()
