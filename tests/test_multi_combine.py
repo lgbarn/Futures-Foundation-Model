@@ -21,7 +21,7 @@ from futures_foundation.rl.base import get_strategy
 from futures_foundation.rl.env import SingleTradeEnv
 from futures_foundation.rl.multi_combine import (
     SixSymbolTopstepStrategy, SymbolEpisode, evaluate_account_attempts,
-    summarize_attempts)
+    random_take_policy, summarize_attempts, take_every_signal_policy)
 from futures_foundation.rl.topstep_zigzag import FRESH_FEATURES
 from futures_foundation.topstep import simulate_combine
 
@@ -187,3 +187,60 @@ def test_summary_pass_rate_and_median_days():
     assert summarize_attempts([]) == {
         "attempts": 0, "passed": 0, "pass_rate": 0.0, "busted": 0,
         "bust_breakdown": {}, "timeout": 0, "median_days_to_pass": None}
+
+
+# ---------------------- AC3: no-skill baselines through the exact same seam
+def _baseline_episodes(rs):
+    """Four non-overlapping signals across two symbols on two days."""
+    nq = SixSymbolTopstepStrategy(symbol="NQ")
+    es = SixSymbolTopstepStrategy(symbol="ES")
+    return [_episode(nq, rs, "2024-04-01 14:00", signal_bar=0),
+            _episode(es, rs, "2024-04-01 15:00", signal_bar=0),
+            _episode(nq, rs, "2024-04-02 14:00", signal_bar=0),
+            _episode(es, rs, "2024-04-02 15:00", signal_bar=0)]
+
+
+def test_take_every_signal_baseline_fixed_minimal_size():
+    rs = {"cum_r": []}
+    episodes = _baseline_episodes(rs)
+    result = evaluate_account_attempts(
+        take_every_signal_policy(CTX_DIM), episodes)
+    assert result["taken"] == result["signals"] == 4   # takes EVERY signal
+    fills = [f for a in result["attempts"] for f in a["fills"]]
+    assert all(abs(f.qty) == 1 for f in fills)         # fixed minimal size
+    # the summary seam is the same one the policy reports through
+    s = summarize_attempts(result["attempts"])
+    assert s["attempts"] >= 1
+    assert s["passed"] + s["busted"] + s["timeout"] == s["attempts"]
+
+
+def test_random_take_baseline_minimal_size_and_deterministic():
+    rs = {"cum_r": []}
+    episodes = _baseline_episodes(rs)
+    r1 = evaluate_account_attempts(random_take_policy(CTX_DIM, seed=7),
+                                   episodes)
+    fills = [f for a in r1["attempts"] for f in a["fills"]]
+    assert all(abs(f.qty) == 1 for f in fills)         # fixed minimal size
+    assert r1["taken"] <= r1["signals"]
+    # same seed -> byte-identical attempt outcomes (fresh policy, reset envs)
+    r2 = evaluate_account_attempts(random_take_policy(CTX_DIM, seed=7),
+                                   episodes)
+    assert r1["taken"] == r2["taken"]
+    assert [a["state"] for a in r1["attempts"]] == \
+           [a["state"] for a in r2["attempts"]]
+    assert [f for a in r1["attempts"] for f in a["fills"]] == \
+           [f for a in r2["attempts"] for f in a["fills"]]
+
+
+def test_baselines_never_flatten_early():
+    # In-trade both baselines HOLD (action 0): exits are purely mechanical
+    # (trail/stop/timeout), so the trade rides to the series end here.
+    rs = {"cum_r": []}
+    nq = SixSymbolTopstepStrategy(symbol="NQ")
+    episodes = [_episode(nq, rs, "2024-04-01 14:00", signal_bar=0, n=8)]
+    result = evaluate_account_attempts(
+        take_every_signal_policy(CTX_DIM), episodes)
+    fills = [f for a in result["attempts"] for f in a["fills"]]
+    # flat series after the spike bar: a first-bar flatten would exit at
+    # 120; holding to the timeout exits back at the flat 100 close
+    assert fills[0].exit == pytest.approx(100.0)

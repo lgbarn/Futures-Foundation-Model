@@ -139,6 +139,21 @@ def evaluate_account_attempts(policy, episodes, rules: CombineRules =
             "skipped_while_open": skipped, "taken": taken}
 
 
+def take_every_signal_policy(ctx_dim: int):
+    """No-skill baseline: take EVERY signal at fixed minimal size (1
+    contract) and never flatten early — exits are purely mechanical
+    (trail / stop / timeout). obs[ctx_dim] is the in_trade flag."""
+    return lambda obs: 0 if obs[ctx_dim] > 0.5 else 1
+
+
+def random_take_policy(ctx_dim: int, seed: int = 0):
+    """No-skill baseline: coin-flip take/skip each signal at fixed minimal
+    size (1 contract), never flattening early. Deterministic per seed."""
+    rng = np.random.default_rng(seed)
+    return (lambda obs: 0 if obs[ctx_dim] > 0.5
+            else int(rng.integers(0, 2)))
+
+
 def summarize_attempts(attempts) -> dict:
     """Pass-rate / days / bust-breakdown numbers over rolling attempts —
     the ONE summary seam the policy and both baselines report through."""
