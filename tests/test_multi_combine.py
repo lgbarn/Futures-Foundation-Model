@@ -191,13 +191,15 @@ def test_summary_pass_rate_and_median_days():
 
 # ---------------------- AC3: no-skill baselines through the exact same seam
 def _baseline_episodes(rs):
-    """Four non-overlapping signals across two symbols on two days."""
+    """Four non-overlapping signals across two symbols on two days. Short
+    series (n=8): a held trade times out at 14:21 / 15:21, before the next
+    signal arrives."""
     nq = SixSymbolTopstepStrategy(symbol="NQ")
     es = SixSymbolTopstepStrategy(symbol="ES")
-    return [_episode(nq, rs, "2024-04-01 14:00", signal_bar=0),
-            _episode(es, rs, "2024-04-01 15:00", signal_bar=0),
-            _episode(nq, rs, "2024-04-02 14:00", signal_bar=0),
-            _episode(es, rs, "2024-04-02 15:00", signal_bar=0)]
+    return [_episode(nq, rs, "2024-04-01 14:00", signal_bar=0, n=8),
+            _episode(es, rs, "2024-04-01 15:00", signal_bar=0, n=8),
+            _episode(nq, rs, "2024-04-02 14:00", signal_bar=0, n=8),
+            _episode(es, rs, "2024-04-02 15:00", signal_bar=0, n=8)]
 
 
 def test_take_every_signal_baseline_fixed_minimal_size():
