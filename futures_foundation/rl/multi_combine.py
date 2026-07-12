@@ -139,6 +139,34 @@ def evaluate_account_attempts(policy, episodes, rules: CombineRules =
             "skipped_while_open": skipped, "taken": taken}
 
 
+def per_symbol_attribution(attempts, rules: CombineRules =
+                           TOPSTEP_100K) -> dict:
+    """Per-symbol {trades, net_pnl, busts} across attempts, for the
+    verdict report.
+
+    Per-fill P&L is derived from each attempt's recorded fills through the
+    pure seam's OWN equity path (never a P&L reimplementation), so
+    unexecuted fills — after a bust, or ignored on a DLL-halted day — are
+    attributed exactly as the simulator treated them. A busted attempt
+    charges one bust to the symbol of its terminal (busting) fill."""
+    out: dict = {}
+    for a in attempts:
+        fills = a["fills"]
+        if not fills:
+            continue
+        eq = simulate_combine(fills, rules).equity
+        prev = rules.start_balance
+        for f, e in zip(fills, eq):                # stops where the seam did
+            s = out.setdefault(f.symbol,
+                               {"trades": 0, "net_pnl": 0.0, "busts": 0})
+            s["trades"] += 1
+            s["net_pnl"] = round(s["net_pnl"] + (float(e) - prev), 2)
+            prev = float(e)
+        if a["state"].startswith("busted"):
+            out[fills[len(eq) - 1].symbol]["busts"] += 1
+    return out
+
+
 def take_every_signal_policy(ctx_dim: int):
     """No-skill baseline: take EVERY signal at fixed minimal size (1
     contract) and never flatten early — exits are purely mechanical

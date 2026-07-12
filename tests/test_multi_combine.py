@@ -21,7 +21,8 @@ from futures_foundation.rl.base import get_strategy
 from futures_foundation.rl.env import SingleTradeEnv
 from futures_foundation.rl.multi_combine import (
     SixSymbolTopstepStrategy, SymbolEpisode, evaluate_account_attempts,
-    random_take_policy, summarize_attempts, take_every_signal_policy)
+    per_symbol_attribution, random_take_policy, summarize_attempts,
+    take_every_signal_policy)
 from futures_foundation.rl.topstep_zigzag import FRESH_FEATURES
 from futures_foundation.topstep import simulate_combine
 
@@ -246,3 +247,58 @@ def test_baselines_never_flatten_early():
     # flat series after the spike bar: a first-bar flatten would exit at
     # 120; holding to the timeout exits back at the flat 100 close
     assert fills[0].exit == pytest.approx(100.0)
+
+
+# ----------------------- AC4: per-symbol attribution for the verdict report
+def test_per_symbol_attribution_hand_computed():
+    # Attempt A (timeout): NQ +20pt @1 -> $400 - $12.80 = $387.20;
+    #                      ES  +2pt @1 -> $100 - $27.80 =  $72.20.
+    # Attempt B (busted-MLL): ES -16pt @10 -> -$8,000 - $278 = -$8,278.
+    from futures_foundation.topstep import Fill as F
+    attempts = [
+        {"state": "timeout", "days": 1, "note": "",
+         "fills": [F(day=1, symbol="NQ", qty=1, entry=17_000.0,
+                     exit=17_020.0),
+                   F(day=1, symbol="ES", qty=1, entry=5_000.0,
+                     exit=5_002.0)]},
+        {"state": "busted-MLL", "days": 1, "note": "",
+         "fills": [F(day=1, symbol="ES", qty=10, entry=5_000.0,
+                     exit=4_984.0)]},
+    ]
+    attrib = per_symbol_attribution(attempts)
+    assert attrib["NQ"] == {"trades": 1, "net_pnl": pytest.approx(387.20),
+                            "busts": 0}
+    assert attrib["ES"] == {"trades": 2,
+                            "net_pnl": pytest.approx(72.20 - 8_278.0),
+                            "busts": 1}
+
+
+def test_attribution_ignores_fills_after_the_bust():
+    # The busting ES fill ends the attempt; a stray NQ fill recorded after
+    # it is not attributed (the seam's equity path stops at the bust).
+    from futures_foundation.topstep import Fill as F
+    attempts = [{"state": "busted-MLL", "days": 1, "note": "", "fills": [
+        F(day=1, symbol="ES", qty=10, entry=5_000.0, exit=4_984.0),
+        F(day=1, symbol="NQ", qty=1, entry=17_000.0, exit=17_020.0)]}]
+    attrib = per_symbol_attribution(attempts)
+    assert "NQ" not in attrib
+    assert attrib["ES"]["busts"] == 1
+
+
+def test_evaluation_attempts_flow_into_attribution():
+    # End-to-end through the evaluate seam: NQ win + ES win on one
+    # timeout attempt, sizes 10 -> hand-scaled dollars.
+    rs = {"cum_r": []}
+    nq = SixSymbolTopstepStrategy(symbol="NQ")
+    es = SixSymbolTopstepStrategy(symbol="ES")
+    episodes = [_episode(nq, rs, "2024-04-01 14:00", signal_bar=0, n=8),
+                _episode(es, rs, "2024-04-01 15:00", signal_bar=0, n=8,
+                         exit_close=102.0)]
+    result = evaluate_account_attempts(_policy(10), episodes)
+    attrib = per_symbol_attribution(result["attempts"])
+    # NQ: +20pt x 10 -> $4,000 - $128 = $3,872
+    assert attrib["NQ"] == {"trades": 1, "net_pnl": pytest.approx(3_872.0),
+                            "busts": 0}
+    # ES: +2pt x 10 -> $1,000 - $278 = $722
+    assert attrib["ES"] == {"trades": 1, "net_pnl": pytest.approx(722.0),
+                            "busts": 0}
